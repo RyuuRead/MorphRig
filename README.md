@@ -53,8 +53,8 @@ The mapper supports Japanese (MMD/VRoid), Chinese (Hoyoverse/Bilibili), and Engl
 
 - Select a mesh with shape keys and click **Generate facial board** in the N-Panel.
 - MorphRig generates custom 3D mesh widgets (frames, tracks, fader handles, and readable white Emission 3D text labels converted to mesh) procedurally via the Blender Python API.
-- The Face Board stacks categories top-to-bottom in a compact single vertical column of horizontal sliders placed to the left of the character (`-X`) when **Separate mouth board** is enabled (or on `+X` when combined).
-- With **Separate mouth board** enabled (the default), MorphRig places a 2D Mouth Joystick Rig (`MorphRig_Board_<Character>_Mouth`) to the right of the character (`+X`), pairing the top `a` horizontal bar (`LOC_X`) and the lower 2D `o / u / i / e` joystick box (`LOC_X`, `LOC_Y`).
+- The Face Board (`1.2x` default proportion) stacks categories top-to-bottom with 2 side-by-side slider lanes per section, placed to the left of the character (`-X`) when **Separate mouth board** is enabled (or on `+X` when combined).
+- With **Separate mouth board** enabled (the default), MorphRig places a 2D Mouth Joystick Rig (`MorphRig_Board_<Character>_Mouth`, `1.15x` proportion) to the right of the character (`+X`), pairing the top `a` horizontal bar (`LOC_X`) and the lower 2D `o / u / i / e` joystick box (`LOC_X`, `LOC_Y`).
 - In Pose Mode, select a Face Board slider bar and move it along its horizontal track (`G` along local Y / world X), or drag the Mouth Rig `a` bar left-to-right and the 2D `o/u/i/e` ring across X and Z. Non-driving axes, rotation, and scale are locked, and `LIMIT_LOCATION` constraints clamp travel to each track or joystick box.
 - Shape key drivers use `AVERAGE` driver type with a linear `FModifierGenerator` (`poly_order = 1`, `coefficients = (0.0, direction / track_len)`), so drivers evaluate without triggering Blender's Auto Run Python Scripts security warning.
 

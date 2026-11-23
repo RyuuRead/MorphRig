@@ -372,31 +372,46 @@ def test_procedural_board_and_text_mesh_generation():
     face_faders = [pb for pb in face_board.pose.bones if pb.name.startswith("Fader_")]
     assert len(face_faders) > 0
     fader_data_bones = [face_board.data.bones[pb.name] for pb in face_faders]
-    fader_xs = [b.head_local.x for b in fader_data_bones]
-    fader_zs = [b.head_local.z for b in fader_data_bones]
-    assert all(abs(x - fader_xs[0]) < 1e-6 for x in fader_xs), f"Faders not aligned in one column: {fader_xs}"
-    assert all(fader_zs[i] > fader_zs[i + 1] for i in range(len(fader_zs) - 1)), (
-        f"Faders should descend top-to-bottom: {fader_zs}"
-    )
+    unique_x = sorted({round(b.head_local.x, 6) for b in fader_data_bones})
+    assert len(unique_x) == 2, f"Expected 2 side-by-side lane X positions, got {unique_x}"
+    for lane_x in unique_x:
+        lane_zs = [b.head_local.z for b in fader_data_bones if abs(b.head_local.x - lane_x) < 1e-5]
+        assert len(lane_zs) > 0
+        assert all(lane_zs[i] > lane_zs[i + 1] for i in range(len(lane_zs) - 1)), (
+            f"Lane {lane_x} faders should descend top-to-bottom: {lane_zs}"
+        )
 
     face_slots = [
         s for s in semantic_mapper.scan_mesh_shape_keys(mesh_obj, include_emotes=True, include_unmapped=False)
         if s.shape_key_name not in {"あ２", "い１", "う", "え", "お"}
     ]
     face_grouped = semantic_mapper.group_control_slots(face_slots, include_emotes=True, include_unmapped=False)
-    face_layout = rig_builder.calculate_board_layout(face_grouped, scale=1.0, track_height=0.12)
-    assert face_layout.width < 0.25, f"Expected compact Face Board width < 0.25, got {face_layout.width}"
-    assert face_layout.height > face_layout.width, (
-        f"Expected portrait Face Board height > width, got {face_layout.height} vs {face_layout.width}"
+    face_layout = rig_builder.calculate_board_layout(
+        face_grouped, scale=1.0 * rig_builder.FACE_RIG_SCALE, track_height=0.12
     )
+    assert face_layout.width < 0.50, f"Expected compact Face Board width < 0.50, got {face_layout.width}"
     frame_wgt = face_board.pose.bones["Board_Root"].custom_shape
     frame_xs = [v.co.x for v in frame_wgt.data.vertices]
-    frame_ys = [v.co.y for v in frame_wgt.data.vertices]
     frame_w = max(frame_xs) - min(frame_xs)
-    frame_h = max(frame_ys) - min(frame_ys)
-    assert frame_w < 0.25 and frame_h > frame_w, f"Unexpected frame bounds: {frame_w} x {frame_h}"
+    assert frame_w < 0.50, f"Unexpected frame width: {frame_w}"
+
+    extra_face_keys = [
+        "真面目", "上", "下", "前", "笑い", "なごみ", "びっくり", "じと目", "痛み",
+        "口角上げ", "口角下げ", "ω", "口横広げ", "てへぺろ", "涙", "汗",
+    ]
+    full_slots = list(face_slots) + [
+        s for s in (semantic_mapper.map_shape_key(k) for k in extra_face_keys) if s is not None
+    ]
+    full_grouped = semantic_mapper.group_control_slots(full_slots, include_emotes=True, include_unmapped=False)
+    full_layout = rig_builder.calculate_board_layout(
+        full_grouped, scale=1.0 * rig_builder.FACE_RIG_SCALE, track_height=0.12
+    )
+    assert full_layout.width < 0.50 and full_layout.height > full_layout.width, (
+        f"Expected tall compact 2-lane board for full character: {full_layout.width} x {full_layout.height}"
+    )
 
     face_travel = float(face_board["morphrig_track_height"])
+    assert abs(face_travel - (0.12 * 0.55 * 1.2)) < 1e-5, f"Unexpected face_travel: {face_travel}"
     for pb in face_faders:
         assert tuple(pb.lock_location) == (True, False, True)
         assert tuple(pb.lock_rotation) == (True, True, True)
@@ -412,7 +427,7 @@ def test_procedural_board_and_text_mesh_generation():
         assert con.use_min_z is True and con.use_max_z is True
 
     box_size = float(mouth_board["morphrig_track_height"])
-    assert box_size <= 0.15, f"Expected compact Mouth Rig box_size <= 0.15, got {box_size}"
+    assert abs(box_size - (0.13 * 1.15)) < 1e-5, f"Unexpected Mouth Rig box_size: {box_size}"
     half = box_size * 0.5
     pb_a = mouth_board.pose.bones["Fader_Vowel_A"]
     assert pb_a.custom_shape is not None and pb_a.custom_shape.name.startswith("WGT_Mouth_Bar_")
@@ -841,4 +856,10 @@ def run_all():
 
 
 if __name__ == "__main__":
-    run_all()
+    import traceback
+
+    try:
+        run_all()
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
