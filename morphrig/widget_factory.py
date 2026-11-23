@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import bpy
+import numpy as np
 from mathutils import Matrix
 
 WIDGET_COLLECTION_PREFIX = "MorphRig_Widgets_"
@@ -80,6 +81,7 @@ def create_board_frame_widget(
     max_x: float,
     max_y: float,
     collection,
+    track_rects=None,
 ) -> bpy.types.Object:
     verts = [
         (min_x, min_y, 0.0),
@@ -88,6 +90,21 @@ def create_board_frame_widget(
         (min_x, max_y, 0.0),
     ]
     edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    if track_rects is not None:
+        for x, z, travel, half_height in track_rects:
+            base = len(verts)
+            verts.extend([
+                (x, z - half_height, 0.0),
+                (x + travel, z - half_height, 0.0),
+                (x + travel, z + half_height, 0.0),
+                (x, z + half_height, 0.0),
+            ])
+            edges.extend([
+                (base, base + 1),
+                (base + 1, base + 2),
+                (base + 2, base + 3),
+                (base + 3, base),
+            ])
     return _create_wire_object(name, verts, edges, [], collection)
 
 
@@ -186,7 +203,7 @@ def cleanup_unused_label_materials() -> None:
             bpy.data.materials.remove(mat)
 
 
-def _create_text_meshes(context, requests) -> list:
+def _create_text_meshes(context, requests, resolution_u: int = 3) -> list:
     """Convert (name, text, size, align_x) requests to meshes with one depsgraph update.
 
     Temporary FONT curves, objects and any font datablock loaded by them are removed
@@ -197,7 +214,7 @@ def _create_text_meshes(context, requests) -> list:
     temps = []
     for name, text_str, size, align_x in requests:
         curve = bpy.data.curves.new(name=f"{name}_tmp", type="FONT")
-        curve.resolution_u = 6
+        curve.resolution_u = int(resolution_u)
         curve.body = text_str
         curve.size = size
         curve.align_x = align_x
@@ -230,8 +247,11 @@ def create_board_text_mesh(
     text_str: str,
     size: float,
     align_x: str = "CENTER",
+    resolution_u: int = 3,
 ) -> bpy.types.Mesh:
-    return _create_text_meshes(context, [(name, text_str, size, align_x)])[0]
+    return _create_text_meshes(
+        context, [(name, text_str, size, align_x)], resolution_u=resolution_u
+    )[0]
 
 
 def build_merged_board_labels_object(
@@ -244,6 +264,7 @@ def build_merged_board_labels_object(
     target_collection: Optional[bpy.types.Collection] = None,
     label_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0),
     material_name: str = LABEL_MAT_FACE,
+    resolution_u: int = 3,
 ) -> bpy.types.Object:
     """Merge every board label into one non-selectable mesh parented to Board_Root.
 
@@ -256,22 +277,63 @@ def build_merged_board_labels_object(
         (f"{obj_name}_{index}", spec.text, spec.size, spec.align_x)
         for index, spec in enumerate(label_specs)
     ]
-    text_meshes = _create_text_meshes(context, requests) if requests else []
+    text_meshes = _create_text_meshes(context, requests, resolution_u=resolution_u) if requests else []
 
-    verts = []
-    faces = []
+    co_chunks = []
+    loop_v_chunks = []
+    loop_start_chunks = []
+    loop_total_chunks = []
+    vert_offset = 0
+    loop_offset = 0
+
     for spec, mesh in zip(label_specs, text_meshes):
-        offset = len(verts)
-        for vert in mesh.vertices:
-            co = vert.co
-            verts.append((co.x + spec.x, co.y + spec.y, co.z))
-        for poly in mesh.polygons:
-            faces.append([index + offset for index in poly.vertices])
+        nv = len(mesh.vertices)
+        nl = len(mesh.loops)
+        npoly = len(mesh.polygons)
+        if nv > 0 and nl > 0 and npoly > 0:
+            co = np.empty(nv * 3, dtype=np.float32)
+            mesh.vertices.foreach_get("co", co)
+            co = co.reshape(nv, 3)
+            co[:, 0] += spec.x
+            co[:, 1] += spec.y
+            co_chunks.append(co)
+
+            v_idx = np.empty(nl, dtype=np.int32)
+            mesh.loops.foreach_get("vertex_index", v_idx)
+            v_idx += vert_offset
+            loop_v_chunks.append(v_idx)
+
+            l_start = np.empty(npoly, dtype=np.int32)
+            mesh.polygons.foreach_get("loop_start", l_start)
+            l_start += loop_offset
+            loop_start_chunks.append(l_start)
+
+            l_total = np.empty(npoly, dtype=np.int32)
+            mesh.polygons.foreach_get("loop_total", l_total)
+            loop_total_chunks.append(l_total)
+
+            vert_offset += nv
+            loop_offset += nl
         bpy.data.meshes.remove(mesh)
 
     merged = bpy.data.meshes.new(obj_name)
-    merged.from_pydata(verts, [], faces)
-    merged.update()
+    if co_chunks:
+        all_co = np.concatenate(co_chunks, axis=0)
+        all_v_idx = np.concatenate(loop_v_chunks)
+        all_l_start = np.concatenate(loop_start_chunks)
+        all_l_total = np.concatenate(loop_total_chunks)
+
+        merged.vertices.add(len(all_co))
+        merged.loops.add(len(all_v_idx))
+        merged.polygons.add(len(all_l_start))
+        merged.vertices.foreach_set("co", all_co.ravel())
+        merged.loops.foreach_set("vertex_index", all_v_idx)
+        merged.polygons.foreach_set("loop_start", all_l_start)
+        merged.polygons.foreach_set("loop_total", all_l_total)
+        merged.update(calc_edges=True)
+    else:
+        merged.update()
+
     label_mat = _get_or_create_label_material(material_name, label_color)
     merged.materials.append(label_mat)
 

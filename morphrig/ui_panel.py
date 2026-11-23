@@ -33,6 +33,13 @@ def _resolve_target_mesh(
             settings.target_mesh = active_obj
         return active_obj
     if active_obj is not None and active_obj.type == "ARMATURE":
+        stored_mesh_name = active_obj.get("morphrig_target_mesh", "")
+        if stored_mesh_name:
+            candidate = bpy.data.objects.get(stored_mesh_name)
+            if _is_valid_target_mesh(candidate):
+                if auto_assign:
+                    settings.target_mesh = candidate
+                return candidate
         from .mmr_bridge import find_face_mesh_for_armature
 
         mesh_obj = find_face_mesh_for_armature(active_obj, context.scene)
@@ -47,6 +54,17 @@ def _find_board_in_scene(
     context: bpy.types.Context,
     target_mesh: Optional[bpy.types.Object] = None,
 ) -> Optional[bpy.types.Object]:
+    active_obj = getattr(context, "active_object", None)
+    if (
+        active_obj is not None
+        and active_obj.type == "ARMATURE"
+        and active_obj.get("morphrig_target_mesh") is not None
+        and (
+            target_mesh is None
+            or active_obj.get("morphrig_target_mesh") == target_mesh.name
+        )
+    ):
+        return active_obj
     scene = getattr(context, "scene", None)
     if scene is None:
         return None
@@ -58,12 +76,15 @@ def _find_board_in_scene(
     for obj in scene.objects:
         if obj.type != "ARMATURE":
             continue
-        is_board = obj.name.startswith("MorphRig_Board_") or (
-            "morphrig_target_mesh" in obj
+        is_embedded = bool(obj.get("morphrig_embedded", False))
+        is_board = (
+            is_embedded
+            or obj.name.startswith("MorphRig_Board_")
+            or ("morphrig_target_mesh" in obj)
         )
         if not is_board:
             continue
-        is_mouth = (
+        is_mouth = (not is_embedded) and (
             obj.get("morphrig_board_role", "") == "mouth"
             or obj.name.endswith("_Mouth")
         )
@@ -199,6 +220,7 @@ class MORPHRIG_OT_generate_board(bpy.types.Operator):
                 board_scale=settings.board_scale,
                 track_height=settings.track_height,
                 separate_mouth_board=settings.separate_mouth_board,
+                merge_into_mmr_rig=settings.merge_into_mmr_rig,
             )
         except (ValueError, RuntimeError) as exc:
             self.report({"WARNING"}, str(exc))
@@ -361,6 +383,7 @@ class MORPHRIG_OT_rebuild_board(bpy.types.Operator):
                 board_scale=settings.board_scale,
                 track_height=settings.track_height,
                 separate_mouth_board=settings.separate_mouth_board,
+                merge_into_mmr_rig=settings.merge_into_mmr_rig,
             )
         except (ValueError, RuntimeError) as exc:
             self.report({"WARNING"}, str(exc))
@@ -424,6 +447,41 @@ class MORPHRIG_OT_toggle_legacy_mmr_emoji(bpy.types.Operator):
         hidden = mmr_bridge.toggle_mmr_emoji_rig(context, mmr_info.armature)
         state_label = "Hidden" if hidden else "Shown"
         self.report({"INFO"}, f"{state_label} legacy MMR emoji rig.")
+        return {"FINISHED"}
+
+
+class MORPHRIG_OT_merge_into_mmr(bpy.types.Operator):
+    bl_idname = "morphrig.merge_into_mmr"
+    bl_label = "Merge board into MMR rig"
+    bl_description = "Embed existing standalone facial board controls into the detected MikuMikuRig armature"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "morphrig", None)
+
+        from . import rig_builder
+
+        target_mesh = _resolve_target_mesh(context, auto_assign=False)
+        merged = rig_builder.merge_standalone_boards_into_mmr(context, target_mesh)
+        if not merged and target_mesh is not None:
+            merged = rig_builder.merge_standalone_boards_into_mmr(context, None)
+        if not merged:
+            self.report(
+                {"WARNING"},
+                "No standalone facial board and target MMR rig found to merge.",
+            )
+            return {"CANCELLED"}
+
+        merged_list = merged if isinstance(merged, (list, tuple)) else [merged]
+        primary = merged_list[0] if merged_list else None
+        if primary is not None and "morphrig_kuchisync_passthrough" in primary:
+            _set_kuchisync_flag(
+                settings,
+                bool(primary.get("morphrig_kuchisync_passthrough", False)),
+            )
+
+        target_name = primary.name if primary is not None else "MMR rig"
+        self.report({"INFO"}, f"Merged facial board controls into '{target_name}'.")
         return {"FINISHED"}
 
 
@@ -569,6 +627,7 @@ class MORPHRIG_PT_main_panel(bpy.types.Panel):
             icon=safe_icon("PREFERENCES"),
         )
         col2 = box2.column(align=True)
+        col2.prop(settings, "merge_into_mmr_rig", text="Merge into MMR rig")
         col2.prop(settings, "follow_head_bone", text="Follow head bone")
         col2.prop(settings, "separate_mouth_board", text="Separate mouth board")
         col2.prop(settings, "include_emotes_row", text="Include emotes row")
@@ -592,6 +651,22 @@ class MORPHRIG_PT_main_panel(bpy.types.Panel):
                 text="Live board actions and KuchiSync sync",
                 icon=safe_icon("POSE_HLT"),
             )
+
+            is_embedded = bool(active_board.get("morphrig_embedded", False))
+            if is_embedded:
+                box3.row().label(
+                    text=f"Embedded in: {active_board.name}",
+                    icon=safe_icon("LINKED"),
+                )
+            elif (
+                mmr_info.is_mmr_rig
+                and mmr_bridge.is_final_mmr_controller_rig(mmr_info.armature)
+            ):
+                box3.row().operator(
+                    "morphrig.merge_into_mmr",
+                    text="Merge board into MMR rig",
+                    icon=safe_icon("AUTOMERGE_ON"),
+                )
 
             ks_enabled = bool(settings.kuchisync_passthrough)
             ks_icon = safe_icon("MUTE_IPO_ON" if ks_enabled else "SPEAKER")
@@ -645,6 +720,7 @@ _OPERATOR_CLASSES = (
     MORPHRIG_OT_rebuild_board,
     MORPHRIG_OT_remove_board,
     MORPHRIG_OT_toggle_legacy_mmr_emoji,
+    MORPHRIG_OT_merge_into_mmr,
 )
 
 

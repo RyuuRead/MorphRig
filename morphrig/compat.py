@@ -40,6 +40,7 @@ def assign_bone_to_collection(
     coll = armature_data.collections.get(collection_name)
     if coll is None:
         coll = armature_data.collections.new(collection_name)
+        coll.is_visible = True
 
     if isinstance(edit_or_pose_bone, bpy.types.PoseBone):
         coll.assign(edit_or_pose_bone.bone)
@@ -156,7 +157,7 @@ def iter_action_fcurves(action):
     legacy_fcurves = getattr(action, "fcurves", None)
     if legacy_fcurves is not None:
         for fc in legacy_fcurves:
-            fc_id = id(fc)
+            fc_id = fc.as_pointer() if hasattr(fc, "as_pointer") else id(fc)
             if fc_id not in seen:
                 seen.add(fc_id)
                 yield fc
@@ -170,7 +171,7 @@ def iter_action_fcurves(action):
                 for bag in channelbags:
                     bag_fcurves = getattr(bag, "fcurves", None) or ()
                     for fc in bag_fcurves:
-                        fc_id = id(fc)
+                        fc_id = fc.as_pointer() if hasattr(fc, "as_pointer") else id(fc)
                         if fc_id not in seen:
                             seen.add(fc_id)
                             yield fc
@@ -196,6 +197,8 @@ def clear_fader_keyframes(board_armature, fader_bone_names=None) -> int:
         for name in fader_bone_names:
             allowed_paths.add(f'pose.bones["{name}"].location')
             allowed_paths.add(f"pose.bones['{name}'].location")
+        if not allowed_paths:
+            return 0
 
     removed = 0
     containers = []

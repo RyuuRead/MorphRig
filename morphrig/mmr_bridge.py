@@ -182,13 +182,32 @@ def _resolve_head_bone_name(arm_obj: bpy.types.Object) -> str:
     return ""
 
 
-def _check_is_mmr_rig(arm_obj: bpy.types.Object) -> bool:
+def _get_mmr_prop(arm_obj: bpy.types.Object):
     mmr_prop = getattr(arm_obj, "mmr", None)
-    if mmr_prop is not None and bool(getattr(mmr_prop, "MMR_Arm", False)):
-        return True
-    if hasattr(arm_obj, "keys") and "mmr" in arm_obj.keys():
-        return True
+    if mmr_prop is not None:
+        return mmr_prop
+    if hasattr(arm_obj, "get"):
+        return arm_obj.get("mmr")
+    return None
+
+
+def _read_prop(prop_obj, attr: str, default=None):
+    if prop_obj is None:
+        return default
+    val = getattr(prop_obj, attr, None)
+    if val is not None:
+        return val
+    if hasattr(prop_obj, "get"):
+        return prop_obj.get(attr, default)
+    return default
+
+
+def _has_generated_rigify_markers(arm_obj: bpy.types.Object) -> bool:
     arm_data = getattr(arm_obj, "data", None)
+    if arm_data is None:
+        return False
+    if hasattr(arm_data, "get") and arm_data.get("rig_id") is not None:
+        return True
     bone_colls = getattr(arm_data, "collections", None)
     if bone_colls is not None:
         for coll_name in _MMR_RIG_COLLECTION_NAMES:
@@ -200,32 +219,90 @@ def _check_is_mmr_rig(arm_obj: bpy.types.Object) -> bool:
     return False
 
 
+def _check_is_mmr_rig(arm_obj: Optional[bpy.types.Object]) -> bool:
+    if arm_obj is None or getattr(arm_obj, "type", "") != "ARMATURE":
+        return False
+    if arm_obj.name.startswith("MMR-"):
+        return False
+    mmr_prop = _get_mmr_prop(arm_obj)
+    if bool(_read_prop(mmr_prop, "MMR_Arm", False)):
+        return True
+    if _has_generated_rigify_markers(arm_obj):
+        return True
+    if arm_obj.name.startswith("RIG-") and _resolve_head_bone_name(arm_obj) != "":
+        return True
+    if bool(_read_prop(mmr_prop, "Generate_controllers", False)):
+        return False
+    if hasattr(arm_obj, "keys") and "mmr" in arm_obj.keys():
+        return True
+    return False
+
+
+def is_final_mmr_controller_rig(arm_obj: Optional[bpy.types.Object]) -> bool:
+    if arm_obj is None or getattr(arm_obj, "type", "") != "ARMATURE":
+        return False
+    if arm_obj.name.startswith("MMR-"):
+        return False
+    mmr_prop = _get_mmr_prop(arm_obj)
+    if (
+        bool(_read_prop(mmr_prop, "Generate_controllers", False))
+        and not bool(_read_prop(mmr_prop, "MMR_Arm", False))
+        and not arm_obj.name.startswith("RIG-")
+        and not _has_generated_rigify_markers(arm_obj)
+    ):
+        return False
+    return _check_is_mmr_rig(arm_obj)
+
+
 def _find_legacy_emoji_objects(scene: Optional[bpy.types.Scene]) -> list[bpy.types.Object]:
     objs = getattr(scene, "objects", None) if scene is not None else getattr(bpy.data, "objects", ())
+    if not objs:
+        return []
     matches = []
-    for obj in objs or ():
+    seen = set()
+    if hasattr(objs, "get"):
+        for name in LEGACY_EMOJI_OBJECT_NAMES:
+            obj = objs.get(name)
+            if obj is not None and obj not in seen:
+                seen.add(obj)
+                matches.append(obj)
+        for obj in objs:
+            if obj not in seen and getattr(obj, "name", "").startswith(LEGACY_EMOJI_OBJECT_PREFIX):
+                seen.add(obj)
+                matches.append(obj)
+        return matches
+
+    for obj in objs:
         name = getattr(obj, "name", "")
         if name in LEGACY_EMOJI_OBJECT_NAMES or name.startswith(LEGACY_EMOJI_OBJECT_PREFIX):
             matches.append(obj)
     return matches
 
 
+def _has_legacy_emoji_object(scene: Optional[bpy.types.Scene]) -> bool:
+    objs = getattr(scene, "objects", None) if scene is not None else getattr(bpy.data, "objects", ())
+    if not objs:
+        return False
+    if hasattr(objs, "get"):
+        for name in LEGACY_EMOJI_OBJECT_NAMES:
+            if objs.get(name) is not None:
+                return True
+        if objs.get("mmr_Mouth_Rig") is not None or objs.get("mmr_Mouth_Rig.01") is not None:
+            return True
+    return any(getattr(obj, "name", "").startswith(LEGACY_EMOJI_OBJECT_PREFIX) for obj in objs)
+
+
 def _find_legacy_emoji_collections(scene: Optional[bpy.types.Scene]) -> list[bpy.types.Collection]:
-    matches = []
-    seen_names = set()
-    if scene is not None and getattr(scene, "collection", None) is not None:
-        for coll in _iter_scene_collections(scene.collection):
-            if coll.name in LEGACY_EMOJI_COLLECTIONS and coll.name not in seen_names:
-                seen_names.add(coll.name)
-                matches.append(coll)
+    matched = []
     for coll_name in LEGACY_EMOJI_COLLECTIONS:
-        if coll_name in seen_names:
-            continue
         coll = bpy.data.collections.get(coll_name)
         if coll is not None:
-            seen_names.add(coll_name)
-            matches.append(coll)
-    return matches
+            matched.append(coll)
+    if not matched or scene is None or getattr(scene, "collection", None) is None:
+        return matched
+    scene_colls = set(_iter_scene_collections(scene.collection))
+    in_scene = [coll for coll in matched if coll in scene_colls]
+    return in_scene if in_scene else matched
 
 
 def _has_legacy_emoji_bones(arm_obj: Optional[bpy.types.Object]) -> bool:
@@ -251,45 +328,61 @@ def _find_companion_mmr_rig(
     scene: Optional[bpy.types.Scene],
 ) -> Optional[bpy.types.Object]:
     objs = getattr(scene, "objects", None) if scene is not None else getattr(bpy.data, "objects", ())
+    expected_rig_name = f"RIG-{arm_obj.name}"
+
+    if objs is not None and hasattr(objs, "get"):
+        cand = objs.get(expected_rig_name)
+        if (
+            cand is not None
+            and cand != arm_obj
+            and getattr(cand, "type", "") == "ARMATURE"
+            and (is_final_mmr_controller_rig(cand) or _resolve_head_bone_name(cand) != "")
+        ):
+            return cand
+
     arm_candidates = [
-        obj for obj in (objs or ()) if getattr(obj, "type", "") == "ARMATURE" and obj != arm_obj
+        obj
+        for obj in (objs or ())
+        if getattr(obj, "type", "") == "ARMATURE" and obj != arm_obj and not obj.name.startswith("MMR-")
     ]
 
     for cand in arm_candidates:
         mmr_prop = getattr(cand, "mmr", None)
-        if mmr_prop is not None and getattr(mmr_prop, "mmd_Armature", None) == arm_obj:
+        if (
+            mmr_prop is not None
+            and getattr(mmr_prop, "mmd_Armature", None) == arm_obj
+            and is_final_mmr_controller_rig(cand)
+        ):
             return cand
 
-    expected_rig_name = f"RIG-{arm_obj.name}"
     for cand in arm_candidates:
         if cand.name == expected_rig_name and (
-            _check_is_mmr_rig(cand) or _resolve_head_bone_name(cand)
+            is_final_mmr_controller_rig(cand) or _resolve_head_bone_name(cand) != ""
         ):
             return cand
 
     pose = getattr(arm_obj, "pose", None)
     pose_bones = getattr(pose, "bones", None)
     if pose_bones is not None:
-        ordered_bones = []
-        seen_names = set()
+        checked_names = set()
         for head_name in HEAD_BONE_PRIORITY:
             pb = pose_bones.get(head_name)
-            if pb is not None:
-                ordered_bones.append(pb)
-                seen_names.add(pb.name)
-        for pb in pose_bones:
-            if pb.name not in seen_names:
-                ordered_bones.append(pb)
-
-        for pb in ordered_bones:
-            for con in getattr(pb, "constraints", ()) or ():
+            if pb is None:
+                continue
+            checked_names.add(pb.name)
+            if not pb.constraints:
+                continue
+            for con in pb.constraints:
                 target = getattr(con, "target", None)
-                if (
-                    target is not None
-                    and getattr(target, "type", "") == "ARMATURE"
-                    and target != arm_obj
-                    and _check_is_mmr_rig(target)
-                ):
+                if target is not None and target != arm_obj and is_final_mmr_controller_rig(target):
+                    return target
+
+        for pb in pose_bones:
+            if pb.name in checked_names or not pb.constraints:
+                continue
+            for con in pb.constraints:
+                target = getattr(con, "target", None)
+                if target is not None and target != arm_obj and is_final_mmr_controller_rig(target):
                     return target
 
     return None
@@ -310,23 +403,25 @@ def find_face_mesh_for_armature(
     if mmd_arm is not None and getattr(mmd_arm, "type", "") == "ARMATURE":
         candidate_arms.add(mmd_arm)
 
-    if arm_obj.name.startswith("RIG-") and objs is not None:
+    if arm_obj.name.startswith("RIG-") and objs is not None and hasattr(objs, "get"):
         base_name = arm_obj.name.removeprefix("RIG-")
         base_obj = objs.get(base_name)
         if base_obj is not None and getattr(base_obj, "type", "") == "ARMATURE":
             candidate_arms.add(base_obj)
 
-    if not _check_is_mmr_rig(arm_obj):
+    if not is_final_mmr_controller_rig(arm_obj):
         companion = _find_companion_mmr_rig(arm_obj, scene)
         if companion is not None:
             candidate_arms.add(companion)
     elif len(candidate_arms) == 1:
         for obj in objs or ():
-            if getattr(obj, "type", "") != "ARMATURE" or obj == arm_obj:
+            if getattr(obj, "type", "") != "ARMATURE" or obj == arm_obj or obj.name.startswith("MMR-"):
                 continue
             pose = getattr(obj, "pose", None)
             for pb in getattr(pose, "bones", ()) or ():
-                if any(getattr(con, "target", None) == arm_obj for con in getattr(pb, "constraints", ()) or ()):
+                if not pb.constraints:
+                    continue
+                if any(getattr(con, "target", None) == arm_obj for con in pb.constraints):
                     candidate_arms.add(obj)
                     break
 
@@ -360,7 +455,7 @@ def detect_mmr_rig_info(mesh_obj: Optional[bpy.types.Object]) -> MMRContextInfo:
     scene = getattr(bpy.context, "scene", None)
     arm_obj = _find_armature_for_object(mesh_obj)
     if arm_obj is None:
-        has_emoji = bool(_find_legacy_emoji_objects(scene) or _find_legacy_emoji_collections(scene))
+        has_emoji = _has_legacy_emoji_object(scene) or bool(_find_legacy_emoji_collections(scene))
         return MMRContextInfo(
             armature=None,
             head_bone_name="",
@@ -368,7 +463,7 @@ def detect_mmr_rig_info(mesh_obj: Optional[bpy.types.Object]) -> MMRContextInfo:
             has_legacy_emoji_rig=has_emoji,
         )
 
-    is_mmr_rig = _check_is_mmr_rig(arm_obj)
+    is_mmr_rig = is_final_mmr_controller_rig(arm_obj)
     if not is_mmr_rig:
         companion = _find_companion_mmr_rig(arm_obj, scene)
         if companion is not None:
@@ -376,7 +471,7 @@ def detect_mmr_rig_info(mesh_obj: Optional[bpy.types.Object]) -> MMRContextInfo:
             has_emoji = (
                 _has_legacy_emoji_bones(companion)
                 or _has_legacy_emoji_bones(arm_obj)
-                or bool(_find_legacy_emoji_objects(scene))
+                or _has_legacy_emoji_object(scene)
                 or bool(_find_legacy_emoji_collections(scene))
             )
             return MMRContextInfo(
@@ -389,7 +484,7 @@ def detect_mmr_rig_info(mesh_obj: Optional[bpy.types.Object]) -> MMRContextInfo:
     head_bone_name = _resolve_head_bone_name(arm_obj)
     has_emoji = (
         _has_legacy_emoji_bones(arm_obj)
-        or bool(_find_legacy_emoji_objects(scene))
+        or _has_legacy_emoji_object(scene)
         or bool(_find_legacy_emoji_collections(scene))
     )
     return MMRContextInfo(

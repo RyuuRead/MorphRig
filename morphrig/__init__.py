@@ -22,6 +22,8 @@ bl_info = {
 }
 
 _syncing_kuchisync = False
+_last_scene_sig = None
+_pending_auto_merge = False
 
 
 def get_addon_preferences(context=None):
@@ -122,6 +124,11 @@ class MorphRigSettings(bpy.types.PropertyGroup):
         type=bpy.types.Object,
         poll=_poll_target_mesh,
     )
+    merge_into_mmr_rig: BoolProperty(
+        name="Merge into MMR rig",
+        description="Embed facial board controls directly inside the detected MikuMikuRig armature for unified Pose Mode editing",
+        default=True,
+    )
     follow_head_bone: BoolProperty(
         name="Follow Head Bone",
         description="Parent the facial board to the detected MikuMikuRig head control bone",
@@ -196,6 +203,68 @@ def _deferred_refresh_panel_category():
     return None
 
 
+def _compute_scene_sig(scene):
+    objs = scene.objects
+    last_name = objs[-1].name if len(objs) else ""
+    return (len(objs), len(bpy.data.armatures), last_name)
+
+
+def _deferred_auto_merge_into_mmr():
+    global _last_scene_sig, _pending_auto_merge
+    try:
+        ctx = getattr(bpy, "context", None)
+        scene = getattr(ctx, "scene", None) if ctx is not None else None
+        settings = getattr(scene, "morphrig", None) if scene is not None else None
+        if settings is not None and settings.merge_into_mmr_rig:
+            from . import rig_builder
+
+            rig_builder.merge_standalone_boards_into_mmr(ctx)
+            _last_scene_sig = _compute_scene_sig(scene)
+    finally:
+        _pending_auto_merge = False
+    return None
+
+
+@bpy.app.handlers.persistent
+def _on_load_post(_dummy=None):
+    global _last_scene_sig, _pending_auto_merge
+    _last_scene_sig = None
+    _pending_auto_merge = False
+
+
+@bpy.app.handlers.persistent
+def _on_depsgraph_update_post(scene, _depsgraph=None):
+    global _last_scene_sig, _pending_auto_merge
+    if scene is None:
+        return
+    sig = _compute_scene_sig(scene)
+    if sig == _last_scene_sig:
+        return
+    _last_scene_sig = sig
+
+    settings = getattr(scene, "morphrig", None)
+    if settings is None or not settings.merge_into_mmr_rig:
+        return
+
+    has_standalone = False
+    has_candidate_rig = False
+    for obj in scene.objects:
+        if obj.type != "ARMATURE":
+            continue
+        if obj.get("morphrig_target_mesh"):
+            if not obj.get("morphrig_embedded"):
+                has_standalone = True
+        elif not obj.name.startswith("MMR-"):
+            has_candidate_rig = True
+        if has_standalone and has_candidate_rig:
+            break
+
+    if has_standalone and has_candidate_rig and not _pending_auto_merge:
+        if hasattr(bpy.app, "timers") and not bpy.app.timers.is_registered(_deferred_auto_merge_into_mmr):
+            _pending_auto_merge = True
+            bpy.app.timers.register(_deferred_auto_merge_into_mmr, first_interval=0.15)
+
+
 def register():
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
@@ -206,11 +275,26 @@ def register():
     ui_panel.register_ui()
     if hasattr(bpy.app, "timers") and not bpy.app.timers.is_registered(_deferred_refresh_panel_category):
         bpy.app.timers.register(_deferred_refresh_panel_category, first_interval=0.5)
+    if _on_depsgraph_update_post not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update_post)
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister():
-    if hasattr(bpy.app, "timers") and bpy.app.timers.is_registered(_deferred_refresh_panel_category):
-        bpy.app.timers.unregister(_deferred_refresh_panel_category)
+    global _last_scene_sig, _pending_auto_merge
+    if hasattr(bpy.app, "timers"):
+        if bpy.app.timers.is_registered(_deferred_refresh_panel_category):
+            bpy.app.timers.unregister(_deferred_refresh_panel_category)
+        if bpy.app.timers.is_registered(_deferred_auto_merge_into_mmr):
+            bpy.app.timers.unregister(_deferred_auto_merge_into_mmr)
+    if _on_depsgraph_update_post in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update_post)
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
+    _last_scene_sig = None
+    _pending_auto_merge = False
+
     from . import ui_panel
 
     ui_panel.unregister_ui()

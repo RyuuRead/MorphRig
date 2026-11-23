@@ -44,12 +44,31 @@ def _ensure_object_mode():
         bpy.ops.object.mode_set(mode="OBJECT")
 
 
+def _unregister_auto_merge_timer():
+    morphrig_mod = sys.modules.get("morphrig")
+    if morphrig_mod is None:
+        return
+    if (
+        hasattr(bpy.app, "timers")
+        and hasattr(morphrig_mod, "_deferred_auto_merge_into_mmr")
+        and bpy.app.timers.is_registered(morphrig_mod._deferred_auto_merge_into_mmr)
+    ):
+        bpy.app.timers.unregister(morphrig_mod._deferred_auto_merge_into_mmr)
+
+
 def _reset_scene():
     _ensure_object_mode()
+    _unregister_auto_merge_timer()
+    morphrig_mod = sys.modules.get("morphrig")
+    if morphrig_mod is not None:
+        morphrig_mod._last_scene_sig = None
+        morphrig_mod._pending_auto_merge = False
+
     scene = bpy.context.scene
     if hasattr(scene, "morphrig"):
         settings = scene.morphrig
         settings.target_mesh = None
+        settings.merge_into_mmr_rig = True
         settings.follow_head_bone = True
         settings.include_emotes_row = True
         settings.include_unmapped_keys = False
@@ -277,7 +296,7 @@ def test_multilingual_semantic_mapper():
     print("[Stage 2] PASS: multilingual mapping, NFKC normalization, R/L pairing, Extra fallback")
 
 
-def _build_board_fixture():
+def _build_board_fixture(merge_into_mmr_rig=False):
     _reset_scene()
     mesh_obj = _create_test_character_mesh("Keqing_Face", REALISTIC_SHAPE_KEYS)
     mmr_arm = _create_armature(
@@ -293,6 +312,7 @@ def _build_board_fixture():
     mesh_obj.select_set(True)
     bpy.context.view_layer.objects.active = mesh_obj
     bpy.context.scene.morphrig.target_mesh = mesh_obj
+    bpy.context.scene.morphrig.merge_into_mmr_rig = merge_into_mmr_rig
 
     res = bpy.ops.morphrig.generate_board()
     assert res == {"FINISHED"}, f"generate_board returned {res}"
@@ -327,10 +347,12 @@ def test_procedural_board_and_text_mesh_generation():
 
     face_colls = {c.name for c in face_board.data.collections}
     mouth_colls = {c.name for c in mouth_board.data.collections}
-    for expected in ("Board", "Tracks", "Eyebrows", "Eyes", "Lips", "Emotes"):
+    for expected in ("Board", "Eyebrows", "Eyes", "Lips", "Emotes"):
         assert expected in face_colls, f"Missing face bone collection: {expected}"
     for expected in ("Board", "Vowels"):
         assert expected in mouth_colls, f"Missing mouth bone collection: {expected}"
+    assert "Tracks" not in face_colls, "Tracks bone collection should not exist without Track_ bones"
+    assert "Tracks" not in mouth_colls
     assert "Vowels" not in face_colls
     assert "Eyebrows" not in mouth_colls and "Eyes" not in mouth_colls
 
@@ -364,10 +386,10 @@ def test_procedural_board_and_text_mesh_generation():
     assert mouth_mat.name == widget_factory.LABEL_MAT_MOUTH
     assert any(n.type == "EMISSION" for n in mouth_mat.node_tree.nodes)
 
-    track_bones = [b for b in face_board.data.bones if b.name.startswith("Track_")]
-    assert len(track_bones) > 0
-    for tb in track_bones:
-        assert tb.hide_select is True
+    assert not any(b.name.startswith("Track_") for b in face_board.data.bones)
+    assert not any(b.name.startswith("Track_") for b in mouth_board.data.bones)
+    assert not any(o.name.startswith("WGT_Slider_Track_") for o in bpy.data.objects)
+    assert not any(m.name.startswith("WGT_Slider_Track_") for m in bpy.data.meshes)
 
     face_faders = [pb for pb in face_board.pose.bones if pb.name.startswith("Fader_")]
     assert len(face_faders) > 0
@@ -394,6 +416,10 @@ def test_procedural_board_and_text_mesh_generation():
     frame_xs = [v.co.x for v in frame_wgt.data.vertices]
     frame_w = max(frame_xs) - min(frame_xs)
     assert frame_w < 0.50, f"Unexpected frame width: {frame_w}"
+    expected_edges = 4 + 4 * len(face_faders)
+    assert len(frame_wgt.data.edges) == expected_edges, (
+        f"Expected {expected_edges} edges in frame + track_rects wireframe, got {len(frame_wgt.data.edges)}"
+    )
 
     extra_face_keys = [
         "真面目", "上", "下", "前", "笑い", "なごみ", "びっくり", "じと目", "痛み",
@@ -504,9 +530,153 @@ def test_procedural_board_and_text_mesh_generation():
     assert combined_board.location.x > bounds_max_x
     assert "morphrig_companion_board" not in combined_board
     combined_colls = {c.name for c in combined_board.data.collections}
-    for expected in ("Board", "Tracks", "Eyebrows", "Eyes", "Lips", "Vowels", "Emotes"):
+    for expected in ("Board", "Eyebrows", "Eyes", "Lips", "Vowels", "Emotes"):
         assert expected in combined_colls, f"Missing combined bone collection: {expected}"
-    print("[Stage 3] PASS: Reference 1 Face Board, Reference 2 Mouth Rig, materials, constraints, keying")
+    assert "Tracks" not in combined_colls
+    assert not any(b.name.startswith("Track_") for b in combined_board.data.bones)
+    combined_faders = [pb for pb in combined_board.pose.bones if pb.name.startswith("Fader_")]
+    combined_frame = combined_board.pose.bones["Board_Root"].custom_shape
+    assert len(combined_frame.data.edges) == 4 + 4 * len(combined_faders)
+
+    _verify_embedded_mmr_rig_workflow()
+    print("[Stage 3] PASS: Standalone tracks-free boards and Embedded MMR Armature merging")
+
+
+def _verify_embedded_mmr_rig_workflow():
+    from mathutils import Vector
+    from morphrig import compat, rig_builder
+
+    face_mesh, _mmd_arm, rig_arm = _build_two_armature_mmr_rig()
+    for coll_name in ("Torso (Redirect)", "_parent"):
+        coll = rig_arm.data.collections.new(coll_name)
+        coll.assign(rig_arm.data.bones["head"])
+
+    rig_arm.location = (0.2, -0.3, 0.1)
+    rig_arm.rotation_euler = (0.15, -0.25, 0.4)
+    rig_arm.scale = (0.08, 0.08, 0.08)
+    bpy.context.view_layer.update()
+
+    rig_arm.pose.bones["head"].keyframe_insert(data_path="location", index=0, frame=1.0)
+    body_mesh = bpy.data.objects["刻晴_body"]
+    body_fc = body_mesh.data.shape_keys.key_blocks["body_dummy"].driver_add("value")
+    body_fc.driver.type = "AVERAGE"
+    body_var = body_fc.driver.variables.new()
+    body_var.name = "head_x"
+    body_var.type = "TRANSFORMS"
+    body_var.targets[0].id = rig_arm
+    body_var.targets[0].bone_target = "head"
+    body_var.targets[0].transform_type = "LOC_X"
+
+    for obj in bpy.context.scene.objects:
+        obj.select_set(False)
+    rig_arm.select_set(True)
+    bpy.context.view_layer.objects.active = rig_arm
+    bpy.ops.object.mode_set(mode="POSE")
+
+    settings = bpy.context.scene.morphrig
+    settings.target_mesh = face_mesh
+    settings.merge_into_mmr_rig = True
+    settings.separate_mouth_board = True
+
+    assert bpy.ops.morphrig.generate_board() == {"FINISHED"}
+    assert rig_arm.mode == "POSE", f"Expected POSE mode to be restored, got {rig_arm.mode}"
+    _ensure_object_mode()
+
+    assert not any(o.name.startswith("MorphRig_Board_") for o in bpy.data.objects)
+    assert rig_builder.find_board_for_mesh(bpy.context, face_mesh) == rig_arm
+    assert bool(rig_arm.get("morphrig_embedded")) is True
+
+    for root_name in (rig_builder.EMBEDDED_FACE_ROOT_NAME, rig_builder.EMBEDDED_MOUTH_ROOT_NAME):
+        root_bone = rig_arm.data.bones.get(root_name)
+        assert root_bone is not None, f"Missing embedded root bone {root_name}"
+        assert root_bone.parent is not None and root_bone.parent.name == "head"
+
+    assert not any(b.name.startswith("Track_") for b in rig_arm.data.bones)
+    assert not any(o.name.startswith("WGT_Slider_Track_") for o in bpy.data.objects)
+
+    rig_colls = {c.name: c for c in rig_arm.data.collections}
+    for expected_coll in (
+        "MorphRig: Board",
+        "MorphRig: Eyebrows",
+        "MorphRig: Eyes",
+        "MorphRig: Lips",
+        "MorphRig: Emotes",
+        "MorphRig: Vowels",
+    ):
+        assert expected_coll in rig_colls, f"Missing embedded collection: {expected_coll}"
+        assert rig_colls[expected_coll].is_visible is True
+    assert "MorphRig: Tracks" not in rig_colls
+    assert "Torso (Redirect)" in rig_colls and "_parent" in rig_colls
+
+    face_faders = [pb for pb in rig_arm.pose.bones if pb.name.startswith("Fader_") and not pb.name.startswith("Fader_Vowel_")]
+    embed_frame_wgt = rig_arm.pose.bones[rig_builder.EMBEDDED_FACE_ROOT_NAME].custom_shape
+    assert len(embed_frame_wgt.data.edges) == 4 + 4 * len(face_faders)
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    depsgraph.update()
+    eval_rig = rig_arm.evaluated_get(depsgraph)
+    for root_name in (rig_builder.EMBEDDED_FACE_ROOT_NAME, rig_builder.EMBEDDED_MOUTH_ROOT_NAME):
+        labels = [
+            o for o in bpy.data.objects
+            if o.parent == rig_arm
+            and o.parent_type == "BONE"
+            and o.parent_bone == root_name
+            and o.name.startswith("MorphRig_Labels_")
+        ]
+        assert len(labels) == 1, f"Expected label object on {root_name}, got {labels}"
+        eval_lbl = labels[0].evaluated_get(depsgraph)
+        verts_world = [eval_lbl.matrix_world @ v.co for v in eval_lbl.data.vertices]
+        centroid = sum(verts_world, Vector((0.0, 0.0, 0.0))) / len(verts_world)
+        root_head_world = eval_rig.matrix_world @ eval_rig.pose.bones[root_name].head
+        dist = (centroid - root_head_world).length
+        assert dist < 1.0, f"World-space label centroid drifted from {root_name}: {dist}"
+
+    face_travel = float(rig_arm["morphrig_track_height"])
+    for target_sk in ("怒り右", "まばたき"):
+        _, fader_name = _find_fader_bone(rig_arm, target_sk)
+        rig_arm.pose.bones[fader_name].location.y = face_travel
+        assert abs(_eval_shape_key(face_mesh, target_sk) - 1.0) < 1e-4
+
+    box_size = float(rig_arm["morphrig_mouth_box_size"])
+    half = box_size * 0.5
+    rig_arm.pose.bones["Fader_Vowel_A"].location.x = box_size
+    assert abs(_eval_shape_key(face_mesh, "あ２") - 1.0) < 1e-4
+
+    pb_joy = _assert_uieso_directions(rig_arm, face_mesh, box_size)
+
+    bpy.context.scene.frame_set(3)
+    assert bpy.ops.morphrig.key_all_sliders() == {"FINISHED"}
+    assert bpy.ops.morphrig.clear_keyframes() == {"FINISHED"}
+    head_fcurves = [
+        fc for fc in compat.iter_action_fcurves(rig_arm.animation_data.action)
+        if fc.data_path == 'pose.bones["head"].location'
+    ]
+    assert len(head_fcurves) == 1, "clear_keyframes must preserve preexisting MMR bone keyframes"
+    fader_fcurves = [
+        fc for fc in compat.iter_action_fcurves(rig_arm.animation_data.action)
+        if 'pose.bones["Fader_' in fc.data_path
+    ]
+    assert len(fader_fcurves) == 0
+
+    rig_arm.pose.bones["Fader_Vowel_A"].location.x = box_size
+    pb_joy.location = (half, 0.0, 0.0)
+    assert bpy.ops.morphrig.toggle_kuchisync() == {"FINISHED"}
+    active_drivers = {fc.data_path for fc in face_mesh.data.shape_keys.animation_data.drivers}
+    assert 'key_blocks["あ２"].value' not in active_drivers
+    assert 'key_blocks["い１"].value' not in active_drivers
+    assert 'key_blocks["まばたき"].value' in active_drivers
+    assert bpy.ops.morphrig.toggle_kuchisync() == {"FINISHED"}
+    assert abs(_eval_shape_key(face_mesh, "あ２") - 1.0) < 1e-4
+    assert abs(_eval_shape_key(face_mesh, "い１") - 1.0) < 1e-4
+
+    _assert_embedded_cleanup(rig_arm, face_mesh)
+    preserved_head_fcs = [
+        fc for fc in compat.iter_action_fcurves(rig_arm.animation_data.action)
+        if fc.data_path == 'pose.bones["head"].location'
+    ]
+    assert len(preserved_head_fcs) == 1
+    body_drivers = [fc.data_path for fc in body_mesh.data.shape_keys.animation_data.drivers]
+    assert 'key_blocks["body_dummy"].value' in body_drivers
 
 
 def _find_fader_bone(boards, target_shape_key):
@@ -532,6 +702,38 @@ def _eval_shape_key(mesh_obj, key_name):
     return eval_mesh.data.shape_keys.key_blocks[key_name].value
 
 
+def _assert_uieso_directions(arm_obj, mesh_obj, box_size):
+    half = box_size * 0.5
+    pb_joy = arm_obj.pose.bones["Fader_Vowel_UIEO"]
+    for loc, active_sk, inactive_sk in (
+        ((half, 0.0, 0.0), "い１", "う"),
+        ((-half, 0.0, 0.0), "う", "い１"),
+        ((0.0, half, 0.0), "お", "え"),
+        ((0.0, -half, 0.0), "え", "お"),
+    ):
+        pb_joy.location = loc
+        assert abs(_eval_shape_key(mesh_obj, active_sk) - 1.0) < 1e-4, f"Expected {active_sk} == 1.0 at {loc}"
+        assert abs(_eval_shape_key(mesh_obj, inactive_sk)) < 1e-4, f"Expected {inactive_sk} == 0.0 at {loc}"
+    return pb_joy
+
+
+def _assert_embedded_cleanup(rig_arm, face_mesh):
+    from morphrig import rig_builder
+
+    assert bpy.ops.morphrig.remove_board() == {"FINISHED"}
+    assert bpy.data.objects.get("RIG-刻晴_arm") is rig_arm
+    assert "head" in rig_arm.data.bones
+    assert "Torso (Redirect)" in rig_arm.data.collections and "_parent" in rig_arm.data.collections
+    assert not any(c.name.startswith(rig_builder.EMBEDDED_COLLECTION_PREFIX) for c in rig_arm.data.collections)
+    assert rig_builder.EMBEDDED_FACE_ROOT_NAME not in rig_arm.data.bones
+    assert rig_builder.EMBEDDED_MOUTH_ROOT_NAME not in rig_arm.data.bones
+    assert not any(k.startswith("morphrig_") for k in rig_arm.keys())
+    assert not any(o.name.startswith("MorphRig_Labels_") for o in bpy.data.objects)
+    assert not any(c.name.startswith("MorphRig_Widgets_") for c in bpy.data.collections)
+    face_anim = face_mesh.data.shape_keys.animation_data
+    assert face_anim is None or not list(face_anim.drivers)
+
+
 def test_fader_to_shapekey_evaluation():
     from morphrig import rig_builder
 
@@ -546,22 +748,12 @@ def test_fader_to_shapekey_evaluation():
         board.pose.bones[fader_name].location.y = face_travel
 
     box_size = float(mouth_board["morphrig_track_height"])
-    half = box_size * 0.5
     mouth_board.pose.bones["Fader_Vowel_A"].location.x = box_size
     assert abs(_eval_shape_key(mesh_obj, "怒り右") - 1.0) < 1e-4
     assert abs(_eval_shape_key(mesh_obj, "まばたき") - 1.0) < 1e-4
     assert abs(_eval_shape_key(mesh_obj, "あ２") - 1.0) < 1e-4
 
-    pb_joy = mouth_board.pose.bones["Fader_Vowel_UIEO"]
-    for loc, active_sk, inactive_sk in (
-        ((half, 0.0, 0.0), "い１", "う"),
-        ((-half, 0.0, 0.0), "う", "い１"),
-        ((0.0, half, 0.0), "お", "え"),
-        ((0.0, -half, 0.0), "え", "お"),
-    ):
-        pb_joy.location = loc
-        assert abs(_eval_shape_key(mesh_obj, active_sk) - 1.0) < 1e-4, f"Expected {active_sk} == 1.0 at {loc}"
-        assert abs(_eval_shape_key(mesh_obj, inactive_sk)) < 1e-4, f"Expected {inactive_sk} == 0.0 at {loc}"
+    _assert_uieso_directions(mouth_board, mesh_obj, box_size)
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
     eval_labels = next(o for o in bpy.data.objects if o.name.startswith("MorphRig_Labels_")).evaluated_get(depsgraph)
@@ -799,6 +991,7 @@ def test_safe_icon_and_panel_draw():
     empty_ops = {r[1] for r in empty_records if r[0] == "operator"}
     assert any("Standalone mode" in t for t in empty_labels)
     assert any("Select a face mesh with shape keys" in t for t in empty_labels)
+    assert ("merge_into_mmr_rig", "Merge into MMR rig") in empty_props
     assert ("separate_mouth_board", "Separate mouth board") in empty_props
     assert {"morphrig.scan_shape_keys", "morphrig.generate_board"}.issubset(empty_ops)
     assert "morphrig.toggle_kuchisync" not in empty_ops
@@ -824,6 +1017,7 @@ def test_safe_icon_and_panel_draw():
     bpy.context.scene.morphrig.target_mesh = face_mesh
     assert bpy.ops.morphrig.generate_board() == {"FINISHED"}
     board_records = _draw_records()
+    board_labels = [r[1] for r in board_records if r[0] == "label"]
     board_ops = {r[1] for r in board_records if r[0] == "operator"}
     board_op_labels = {(r[1], r[2]) for r in board_records if r[0] == "operator"}
     expected_box3_ops = {
@@ -835,11 +1029,130 @@ def test_safe_icon_and_panel_draw():
         "morphrig.remove_board",
     }
     assert expected_box3_ops.issubset(board_ops), f"Missing Box 3 ops: {expected_box3_ops - board_ops}"
+    assert any(t == f"Embedded in: {rig_arm.name}" for t in board_labels)
+    assert "morphrig.merge_into_mmr" not in board_ops
     assert ("morphrig.toggle_kuchisync", "KuchiSync passthrough (release vowel drivers)") in board_op_labels
 
-    assert rig_builder.remove_boards_for_mesh(bpy.context, face_mesh) == 2
+    assert rig_builder.remove_boards_for_mesh(bpy.context, face_mesh) == 1
     assert rig_builder.find_board_for_mesh(bpy.context, face_mesh) is None
-    print("[Stage 8] PASS: safe_icon lookup + MORPHRIG_PT_main_panel.draw across all 4 UI states")
+
+    bpy.context.scene.morphrig.merge_into_mmr_rig = False
+    assert bpy.ops.morphrig.generate_board() == {"FINISHED"}
+    standalone_records = _draw_records()
+    standalone_ops = {r[1] for r in standalone_records if r[0] == "operator"}
+    assert "morphrig.merge_into_mmr" in standalone_ops
+
+    assert bpy.ops.morphrig.merge_into_mmr() == {"FINISHED"}
+    merged_records = _draw_records()
+    merged_labels = [r[1] for r in merged_records if r[0] == "label"]
+    merged_ops = {r[1] for r in merged_records if r[0] == "operator"}
+    assert any(t == f"Embedded in: {rig_arm.name}" for t in merged_labels)
+    assert "morphrig.merge_into_mmr" not in merged_ops
+    assert rig_builder.find_board_for_mesh(bpy.context, face_mesh) == rig_arm
+
+    assert rig_builder.remove_boards_for_mesh(bpy.context, face_mesh) == 1
+    assert rig_builder.find_board_for_mesh(bpy.context, face_mesh) is None
+    print("[Stage 8] PASS: safe_icon lookup + MORPHRIG_PT_main_panel.draw across embedded and standalone states")
+
+
+def test_auto_merge_when_mmr_generated_after_morphrig():
+    import morphrig
+    from morphrig import mmr_bridge, rig_builder
+
+    _reset_scene()
+    mmd_arm = _create_armature(
+        "刻晴_arm",
+        [("頭", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))],
+    )
+    face_mesh = _create_test_character_mesh("刻晴_mesh", REALISTIC_SHAPE_KEYS)
+    face_mod = face_mesh.modifiers.new(name="Armature", type="ARMATURE")
+    face_mod.object = mmd_arm
+
+    for obj in bpy.context.scene.objects:
+        obj.select_set(False)
+    face_mesh.select_set(True)
+    bpy.context.view_layer.objects.active = face_mesh
+    settings = bpy.context.scene.morphrig
+    settings.target_mesh = face_mesh
+    settings.merge_into_mmr_rig = True
+    assert bpy.ops.morphrig.generate_board() == {"FINISHED"}
+
+    boards = rig_builder.find_boards_for_mesh(bpy.context, face_mesh)
+    assert len(boards) == 2
+    assert bpy.ops.morphrig.toggle_kuchisync() == {"FINISHED"}
+    assert settings.kuchisync_passthrough is True
+    assert 'key_blocks["あ２"].value' not in {
+        fc.data_path for fc in face_mesh.data.shape_keys.animation_data.drivers
+    }
+
+    temp_metarig = _create_armature(
+        "MMR-刻晴_arm",
+        [("head", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))],
+    )
+    temp_metarig["mmr"] = True
+    assert mmr_bridge.is_final_mmr_controller_rig(temp_metarig) is False
+    temp_con = mmd_arm.pose.bones["頭"].constraints.new("COPY_TRANSFORMS")
+    temp_con.target = temp_metarig
+    temp_con.subtarget = "head"
+    assert mmr_bridge.detect_mmr_rig_info(face_mesh).is_mmr_rig is False
+    assert rig_builder.merge_standalone_boards_into_mmr(bpy.context) == []
+
+    _unregister_auto_merge_timer()
+    morphrig._last_scene_sig = None
+    morphrig._pending_auto_merge = False
+    morphrig._on_depsgraph_update_post(bpy.context.scene)
+    _unregister_auto_merge_timer()
+    morphrig._deferred_auto_merge_into_mmr()
+
+    assert len(rig_builder.find_boards_for_mesh(bpy.context, face_mesh)) == 2
+    assert temp_metarig.get("morphrig_embedded") is None
+    mmd_arm.pose.bones["頭"].constraints.remove(temp_con)
+    temp_data = temp_metarig.data
+    bpy.data.objects.remove(temp_metarig, do_unlink=True)
+    if temp_data.users == 0:
+        bpy.data.armatures.remove(temp_data)
+
+    rig_arm = _create_armature(
+        "RIG-刻晴_arm",
+        [("head", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))],
+    )
+    rig_arm["mmr"] = True
+    for coll_name in ("Torso (Redirect)", "_parent"):
+        coll = rig_arm.data.collections.new(coll_name)
+        coll.assign(rig_arm.data.bones["head"])
+    con = mmd_arm.pose.bones["頭"].constraints.new("COPY_TRANSFORMS")
+    con.target = rig_arm
+    con.subtarget = "head"
+
+    morphrig._last_scene_sig = None
+    morphrig._pending_auto_merge = False
+    morphrig._on_depsgraph_update_post(bpy.context.scene)
+    assert morphrig._pending_auto_merge is True
+    _unregister_auto_merge_timer()
+    morphrig._deferred_auto_merge_into_mmr()
+
+    assert morphrig._pending_auto_merge is False
+    assert not any(o.name.startswith("MorphRig_Board_") for o in bpy.data.objects)
+    assert rig_builder.find_board_for_mesh(bpy.context, face_mesh) == rig_arm
+    assert bool(rig_arm.get("morphrig_embedded")) is True
+    assert bool(rig_arm.get("morphrig_kuchisync_passthrough")) is True
+    assert settings.kuchisync_passthrough is True
+    assert "Fader_Vowel_A" in rig_arm.pose.bones and "Fader_Vowel_UIEO" in rig_arm.pose.bones
+    assert 'key_blocks["あ２"].value' not in {
+        fc.data_path for fc in face_mesh.data.shape_keys.animation_data.drivers
+    }
+    assert 'key_blocks["まばたき"].value' in {
+        fc.data_path for fc in face_mesh.data.shape_keys.animation_data.drivers
+    }
+
+    assert bpy.ops.morphrig.toggle_kuchisync() == {"FINISHED"}
+    assert settings.kuchisync_passthrough is False
+    assert bool(rig_arm.get("morphrig_kuchisync_passthrough")) is False
+    rig_arm.pose.bones["Fader_Vowel_A"].location.x = float(rig_arm["morphrig_mouth_box_size"])
+    assert abs(_eval_shape_key(face_mesh, "あ２") - 1.0) < 1e-4
+
+    _assert_embedded_cleanup(rig_arm, face_mesh)
+    print("[Stage 9] PASS: deferred auto-merge rejects MMR-* metarigs and preserves KuchiSync across RIG-* merge")
 
 
 def run_all():
@@ -851,8 +1164,9 @@ def run_all():
     test_clean_removal()
     test_two_armature_mmr_bridge()
     test_safe_icon_and_panel_draw()
+    test_auto_merge_when_mmr_generated_after_morphrig()
     _reset_scene()
-    print("ALL 8 MORPHRIG TEST STAGES PASSED")
+    print("ALL 9 MORPHRIG TEST STAGES PASSED")
 
 
 if __name__ == "__main__":

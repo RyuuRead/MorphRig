@@ -14,6 +14,9 @@ from .widget_factory import TextLabelSpec
 
 BOARD_PREFIX = "MorphRig_Board_"
 BOARD_ROOT_NAME = "Board_Root"
+EMBEDDED_FACE_ROOT_NAME = "MorphRig_Face_Root"
+EMBEDDED_MOUTH_ROOT_NAME = "MorphRig_Mouth_Root"
+EMBEDDED_COLLECTION_PREFIX = "MorphRig: "
 BOARD_COLLECTION = "Board"
 TRACKS_COLLECTION = "Tracks"
 FADER_PREFIX = "Fader_"
@@ -252,6 +255,8 @@ def _fader_names(board_armature) -> list:
     fader_map = _load_json(board_armature, "morphrig_fader_map", {})
     if fader_map:
         return [name for name in fader_map if name in board_armature.pose.bones]
+    if board_armature.get("morphrig_embedded"):
+        return []
     return [pb.name for pb in board_armature.pose.bones if pb.name.startswith(FADER_PREFIX)]
 
 
@@ -272,7 +277,7 @@ def find_all_boards() -> list:
 
 def _board_sort_key(board) -> tuple:
     role = board.get("morphrig_board_role", "")
-    if role in ("face", "combined"):
+    if role in ("embedded", "face", "combined") or board.get("morphrig_embedded"):
         return (0, board.name)
     if role == "mouth" or board.name.endswith("_Mouth"):
         return (2, board.name)
@@ -489,6 +494,180 @@ def _collect_vowel_keys(entries) -> list:
     return vowel_keys
 
 
+def _assign_visible_collection(
+    arm_data,
+    pose_bone,
+    collection_name: str,
+    palette: str,
+    owned_collections: Optional[list] = None,
+):
+    coll = compat.assign_bone_to_collection(arm_data, pose_bone, collection_name, palette)
+    if coll is not None:
+        coll.is_visible = True
+        if owned_collections is not None and collection_name not in owned_collections:
+            owned_collections.append(collection_name)
+    return coll
+
+
+def _bind_face_sliders_pose(
+    board,
+    target_mesh,
+    entries: Sequence[tuple],
+    cap_wgt,
+    travel: float,
+    collection_prefix: str = "",
+    owned_collections: Optional[list] = None,
+) -> tuple[dict, list]:
+    arm_data = board.data
+    pose_bones = board.pose.bones
+    fader_map = {}
+    driver_bindings = []
+
+    for placement, fader_name in entries:
+        fader_pb = pose_bones[fader_name]
+        palette = _palette_for(placement.row, placement.side)
+        _configure_fader_pose_bone(fader_pb, cap_wgt, travel)
+        _assign_visible_collection(
+            arm_data, fader_pb, f"{collection_prefix}{placement.row}", palette, owned_collections
+        )
+        fader_map[fader_name] = {
+            "shape_key": placement.shape_key_name,
+            "row": placement.row,
+            "side": placement.side,
+            "palette": palette,
+        }
+        compat.bind_fader_driver(
+            target_mesh,
+            placement.shape_key_name,
+            board,
+            fader_name,
+            travel,
+            transform_type="LOC_Y",
+            direction=1.0,
+        )
+        driver_bindings.append({
+            "bone": fader_name,
+            "shape_key": placement.shape_key_name,
+            "row": placement.row,
+            "side": placement.side,
+            "axis": "LOC_Y",
+            "travel": float(travel),
+            "direction": 1.0,
+        })
+
+    return fader_map, driver_bindings
+
+
+def _bind_mouth_joystick_pose(
+    board,
+    target_mesh,
+    primary_vowels: dict,
+    box_size: float,
+    bar_wgt,
+    joy_wgt,
+    collection_name: str,
+    bone_a_name: str = "Fader_Vowel_A",
+    bone_joy_name: str = "Fader_Vowel_UIEO",
+    owned_collections: Optional[list] = None,
+) -> tuple[dict, list]:
+    arm_data = board.data
+    pose_bones = board.pose.bones
+    half = box_size * 0.5
+    fader_map = {}
+    driver_bindings = []
+
+    if "A" in primary_vowels and bone_a_name:
+        slot_a = primary_vowels["A"]
+        pb_a = pose_bones[bone_a_name]
+        _configure_constrained_pose_bone(
+            pb_a, bar_wgt, (False, True, True), (0.0, 0.0, 0.0), (box_size, 0.0, 0.0)
+        )
+        _assign_visible_collection(arm_data, pb_a, collection_name, "THEME03", owned_collections)
+        compat.bind_fader_driver(
+            target_mesh,
+            slot_a.shape_key_name,
+            board,
+            bone_a_name,
+            box_size,
+            transform_type="LOC_X",
+            direction=1.0,
+        )
+        fader_map[bone_a_name] = {
+            "shape_key": slot_a.shape_key_name,
+            "row": "Vowels",
+            "side": slot_a.side,
+            "palette": "THEME03",
+        }
+        driver_bindings.append({
+            "bone": bone_a_name,
+            "shape_key": slot_a.shape_key_name,
+            "row": "Vowels",
+            "side": slot_a.side,
+            "axis": "LOC_X",
+            "travel": float(box_size),
+            "direction": 1.0,
+        })
+
+    if bone_joy_name and any(key in primary_vowels for key in ("I", "U", "E", "O")):
+        pb_joy = pose_bones[bone_joy_name]
+        _configure_constrained_pose_bone(
+            pb_joy, joy_wgt, (False, False, True), (-half, -half, 0.0), (half, half, 0.0)
+        )
+        _assign_visible_collection(arm_data, pb_joy, collection_name, "THEME03", owned_collections)
+        first_uieo_slot = None
+        for vowel in ("I", "U", "O", "E"):
+            slot = primary_vowels.get(vowel)
+            if slot is None:
+                continue
+            if first_uieo_slot is None:
+                first_uieo_slot = slot
+            axis, direction = _MOUTH_JOYSTICK_AXES[vowel]
+            compat.bind_fader_driver(
+                target_mesh,
+                slot.shape_key_name,
+                board,
+                bone_joy_name,
+                half,
+                transform_type=axis,
+                direction=direction,
+            )
+            driver_bindings.append({
+                "bone": bone_joy_name,
+                "shape_key": slot.shape_key_name,
+                "row": "Vowels",
+                "side": slot.side,
+                "axis": axis,
+                "travel": float(half),
+                "direction": float(direction),
+            })
+        if first_uieo_slot is not None:
+            fader_map[bone_joy_name] = {
+                "shape_key": first_uieo_slot.shape_key_name,
+                "row": "Vowels",
+                "side": first_uieo_slot.side,
+                "palette": "THEME03",
+            }
+
+    return fader_map, driver_bindings
+
+
+def _mouth_label_specs(primary_vowels: dict, box_size: float, bar_y: float, scale: float) -> list:
+    half = box_size * 0.5
+    font_size = 0.018 * scale
+    specs = []
+    if "A" in primary_vowels:
+        specs.append(TextLabelSpec("a", -0.014 * scale, bar_y - 0.005 * scale, font_size, "RIGHT"))
+    if "O" in primary_vowels:
+        specs.append(TextLabelSpec("o", half, box_size - 0.019 * scale, font_size, "CENTER"))
+    if "E" in primary_vowels:
+        specs.append(TextLabelSpec("e", half, 0.007 * scale, font_size, "CENTER"))
+    if "U" in primary_vowels:
+        specs.append(TextLabelSpec("u", 0.014 * scale, half - 0.006 * scale, font_size, "CENTER"))
+    if "I" in primary_vowels:
+        specs.append(TextLabelSpec("i", box_size - 0.014 * scale, half - 0.006 * scale, font_size, "CENTER"))
+    return specs
+
+
 def _populate_board(
     context,
     board,
@@ -499,9 +678,10 @@ def _populate_board(
     widget_coll,
     widgets,
     char_name: Optional[str] = None,
+    build_options: Optional[dict] = None,
 ) -> None:
     arm_data = board.data
-    frame_wgt, track_wgt, cap_wgt = widgets
+    frame_wgt, cap_wgt = widgets
     travel = layout.track_height
     root_length = 0.05 * scale
     fader_length = 0.012 * scale
@@ -523,16 +703,6 @@ def _populate_board(
             if placement.side and not core.endswith(f"_{placement.side}"):
                 core = f"{core}_{placement.side}"
             fader_name = _unique_name(f"{FADER_PREFIX}{core}", used_names)
-            track_name = _unique_name(f"{TRACK_PREFIX}{core}", used_names)
-
-            track = edit_bones.new(track_name)
-            track.head = (placement.x, 0.0, placement.z)
-            track.tail = (placement.x + travel, 0.0, placement.z)
-            track.align_roll(Vector((0.0, -1.0, 0.0)))
-            track.parent = root
-            track.use_connect = False
-            track.use_deform = False
-            track.hide_select = True
 
             fader = edit_bones.new(fader_name)
             fader.head = (placement.x, 0.0, placement.z)
@@ -542,62 +712,20 @@ def _populate_board(
             fader.use_connect = False
             fader.use_deform = False
 
-            entries.append((placement, fader_name, track_name))
+            entries.append((placement, fader_name))
     finally:
         bpy.ops.object.mode_set(mode="OBJECT")
 
-    pose_bones = board.pose.bones
-    root_pb = pose_bones[BOARD_ROOT_NAME]
+    root_pb = board.pose.bones[BOARD_ROOT_NAME]
     root_pb.custom_shape = frame_wgt
     root_pb.use_custom_shape_bone_size = False
-    compat.assign_bone_to_collection(
+    _assign_visible_collection(
         arm_data, root_pb, BOARD_COLLECTION, compat.ROW_COLOR_PALETTES["Board"]
     )
 
-    fader_map = {}
-    driver_bindings = []
-    for placement, fader_name, track_name in entries:
-        track_pb = pose_bones[track_name]
-        track_pb.custom_shape = track_wgt
-        track_pb.use_custom_shape_bone_size = False
-        track_pb.lock_location = (True, True, True)
-        track_pb.lock_rotation = (True, True, True)
-        track_pb.lock_scale = (True, True, True)
-        track_pb.bone.hide_select = True
-        compat.assign_bone_to_collection(
-            arm_data, track_pb, TRACKS_COLLECTION, compat.ROW_COLOR_PALETTES["Tracks"]
-        )
-
-        fader_pb = pose_bones[fader_name]
-        palette = _palette_for(placement.row, placement.side)
-        _configure_fader_pose_bone(fader_pb, cap_wgt, travel)
-        compat.assign_bone_to_collection(arm_data, fader_pb, placement.row, palette)
-        fader_map[fader_name] = {
-            "shape_key": placement.shape_key_name,
-            "row": placement.row,
-            "side": placement.side,
-            "palette": palette,
-        }
-
-    for placement, fader_name, _track_name in entries:
-        compat.bind_fader_driver(
-            target_mesh,
-            placement.shape_key_name,
-            board,
-            fader_name,
-            travel,
-            transform_type="LOC_Y",
-            direction=1.0,
-        )
-        driver_bindings.append({
-            "bone": fader_name,
-            "shape_key": placement.shape_key_name,
-            "row": placement.row,
-            "side": placement.side,
-            "axis": "LOC_Y",
-            "travel": float(travel),
-            "direction": 1.0,
-        })
+    fader_map, driver_bindings = _bind_face_sliders_pose(
+        board, target_mesh, entries, cap_wgt, travel
+    )
 
     labels_obj = widget_factory.build_merged_board_labels_object(
         context,
@@ -609,21 +737,27 @@ def _populate_board(
         target_collection=context.scene.collection,
         label_color=(1.0, 1.0, 1.0, 1.0),
         material_name=widget_factory.LABEL_MAT_FACE,
+        resolution_u=3,
     )
 
     vowel_keys = _collect_vowel_keys(
         [(placement.row, placement.shape_key_name) for placement in layout.faders]
     )
+    owned_bones = [BOARD_ROOT_NAME] + [name for _, name in entries]
+    board["morphrig_embedded"] = False
     board["morphrig_target_mesh"] = target_mesh.name
     board["morphrig_vowel_keys"] = json.dumps(vowel_keys, ensure_ascii=False)
     board["morphrig_fader_map"] = json.dumps(fader_map, ensure_ascii=False)
     board["morphrig_driver_bindings"] = json.dumps(driver_bindings, ensure_ascii=False)
+    board["morphrig_owned_bones"] = json.dumps(owned_bones, ensure_ascii=False)
     board["morphrig_track_height"] = float(travel)
     board["morphrig_char_name"] = char_name if char_name is not None else board_token
     board["morphrig_widget_collection"] = widget_coll.name
+    board["morphrig_labels_objects"] = json.dumps([labels_obj.name], ensure_ascii=False)
     board["morphrig_labels_object"] = labels_obj.name
     board["morphrig_board_scale"] = scale
     board["morphrig_kuchisync_passthrough"] = False
+    board["morphrig_build_options"] = json.dumps(build_options or {}, ensure_ascii=False)
 
 
 def _discard_partial_board(context, board, widgets) -> None:
@@ -643,16 +777,21 @@ def _create_single_board(
     location: Vector,
     scale: float,
     widget_coll,
+    build_options: Optional[dict] = None,
 ) -> bpy.types.Object:
+    track_rects = [(p.x, p.z, layout.track_height, 0.0048 * scale) for p in layout.faders]
     frame_wgt = widget_factory.create_board_frame_widget(
-        f"WGT_Board_Frame_{board_token}", 0.0, 0.0, layout.width, layout.height, widget_coll
-    )
-    track_wgt = widget_factory.create_slider_track_widget(
-        f"WGT_Slider_Track_{board_token}", layout.track_height, scale, widget_coll
+        f"WGT_Board_Frame_{board_token}",
+        0.0,
+        0.0,
+        layout.width,
+        layout.height,
+        widget_coll,
+        track_rects=track_rects,
     )
     cap_wgt = widget_factory.create_slider_cap_widget(f"WGT_Slider_Cap_{board_token}", scale, widget_coll)
     board = _create_board_object(context, board_token, target_mesh, char_name, role, location, widget_coll)
-    widgets = (frame_wgt, track_wgt, cap_wgt)
+    widgets = (frame_wgt, cap_wgt)
     try:
         _populate_board(
             context,
@@ -664,6 +803,7 @@ def _create_single_board(
             widget_coll,
             widgets,
             char_name=char_name,
+            build_options=build_options,
         )
     except Exception:
         _discard_partial_board(context, board, widgets)
@@ -701,6 +841,7 @@ def _populate_mouth_joystick_board(
     widgets,
     box_size: float,
     bar_gap: float,
+    build_options: Optional[dict] = None,
 ) -> None:
     arm_data = board.data
     frame_wgt, bar_wgt, joy_wgt = widgets
@@ -741,101 +882,17 @@ def _populate_mouth_joystick_board(
     finally:
         bpy.ops.object.mode_set(mode="OBJECT")
 
-    pose_bones = board.pose.bones
-    root_pb = pose_bones[BOARD_ROOT_NAME]
+    root_pb = board.pose.bones[BOARD_ROOT_NAME]
     root_pb.custom_shape = frame_wgt
     root_pb.use_custom_shape_bone_size = False
-    compat.assign_bone_to_collection(
+    _assign_visible_collection(
         arm_data, root_pb, BOARD_COLLECTION, compat.ROW_COLOR_PALETTES["Board"]
     )
 
-    fader_map = {}
-    driver_bindings = []
-    if has_a:
-        slot_a = primary_vowels["A"]
-        pb_a = pose_bones["Fader_Vowel_A"]
-        _configure_constrained_pose_bone(
-            pb_a, bar_wgt, (False, True, True), (0.0, 0.0, 0.0), (box_size, 0.0, 0.0)
-        )
-        compat.assign_bone_to_collection(arm_data, pb_a, "Vowels", "THEME03")
-        compat.bind_fader_driver(
-            target_mesh,
-            slot_a.shape_key_name,
-            board,
-            "Fader_Vowel_A",
-            box_size,
-            transform_type="LOC_X",
-            direction=1.0,
-        )
-        fader_map["Fader_Vowel_A"] = {
-            "shape_key": slot_a.shape_key_name,
-            "row": "Vowels",
-            "side": slot_a.side,
-            "palette": "THEME03",
-        }
-        driver_bindings.append({
-            "bone": "Fader_Vowel_A",
-            "shape_key": slot_a.shape_key_name,
-            "row": "Vowels",
-            "side": slot_a.side,
-            "axis": "LOC_X",
-            "travel": float(box_size),
-            "direction": 1.0,
-        })
-
-    if has_uieo:
-        pb_joy = pose_bones["Fader_Vowel_UIEO"]
-        _configure_constrained_pose_bone(
-            pb_joy, joy_wgt, (False, False, True), (-half, -half, 0.0), (half, half, 0.0)
-        )
-        compat.assign_bone_to_collection(arm_data, pb_joy, "Vowels", "THEME03")
-        first_uieo_slot = None
-        for vowel in ("I", "U", "O", "E"):
-            slot = primary_vowels.get(vowel)
-            if slot is None:
-                continue
-            if first_uieo_slot is None:
-                first_uieo_slot = slot
-            axis, direction = _MOUTH_JOYSTICK_AXES[vowel]
-            compat.bind_fader_driver(
-                target_mesh,
-                slot.shape_key_name,
-                board,
-                "Fader_Vowel_UIEO",
-                half,
-                transform_type=axis,
-                direction=direction,
-            )
-            driver_bindings.append({
-                "bone": "Fader_Vowel_UIEO",
-                "shape_key": slot.shape_key_name,
-                "row": "Vowels",
-                "side": slot.side,
-                "axis": axis,
-                "travel": float(half),
-                "direction": float(direction),
-            })
-        if first_uieo_slot is not None:
-            fader_map["Fader_Vowel_UIEO"] = {
-                "shape_key": first_uieo_slot.shape_key_name,
-                "row": "Vowels",
-                "side": first_uieo_slot.side,
-                "palette": "THEME03",
-            }
-
-    font_size = 0.018 * scale
-    label_specs = []
-    if has_a:
-        label_specs.append(TextLabelSpec("a", -0.014 * scale, bar_y - 0.005 * scale, font_size, "RIGHT"))
-    if "O" in primary_vowels:
-        label_specs.append(TextLabelSpec("o", half, box_size - 0.019 * scale, font_size, "CENTER"))
-    if "E" in primary_vowels:
-        label_specs.append(TextLabelSpec("e", half, 0.007 * scale, font_size, "CENTER"))
-    if "U" in primary_vowels:
-        label_specs.append(TextLabelSpec("u", 0.014 * scale, half - 0.006 * scale, font_size, "CENTER"))
-    if "I" in primary_vowels:
-        label_specs.append(TextLabelSpec("i", box_size - 0.014 * scale, half - 0.006 * scale, font_size, "CENTER"))
-
+    fader_map, driver_bindings = _bind_mouth_joystick_pose(
+        board, target_mesh, primary_vowels, box_size, bar_wgt, joy_wgt, "Vowels"
+    )
+    label_specs = _mouth_label_specs(primary_vowels, box_size, bar_y, scale)
     labels_obj = widget_factory.build_merged_board_labels_object(
         context,
         mouth_token,
@@ -846,21 +903,28 @@ def _populate_mouth_joystick_board(
         target_collection=context.scene.collection,
         label_color=(1.0, 0.62, 0.18, 1.0),
         material_name=widget_factory.LABEL_MAT_MOUTH,
+        resolution_u=4,
     )
 
     vowel_keys = _collect_vowel_keys(
         [("Vowels", binding["shape_key"]) for binding in driver_bindings]
     )
+    owned_bones = [BOARD_ROOT_NAME] + list(fader_map.keys())
+    board["morphrig_embedded"] = False
     board["morphrig_target_mesh"] = target_mesh.name
     board["morphrig_vowel_keys"] = json.dumps(vowel_keys, ensure_ascii=False)
     board["morphrig_fader_map"] = json.dumps(fader_map, ensure_ascii=False)
     board["morphrig_driver_bindings"] = json.dumps(driver_bindings, ensure_ascii=False)
+    board["morphrig_owned_bones"] = json.dumps(owned_bones, ensure_ascii=False)
     board["morphrig_track_height"] = float(box_size)
+    board["morphrig_mouth_box_size"] = float(box_size)
     board["morphrig_char_name"] = char_name
     board["morphrig_widget_collection"] = widget_coll.name
+    board["morphrig_labels_objects"] = json.dumps([labels_obj.name], ensure_ascii=False)
     board["morphrig_labels_object"] = labels_obj.name
     board["morphrig_board_scale"] = scale
     board["morphrig_kuchisync_passthrough"] = False
+    board["morphrig_build_options"] = json.dumps(build_options or {}, ensure_ascii=False)
 
 
 def _create_mouth_joystick_board(
@@ -872,6 +936,7 @@ def _create_mouth_joystick_board(
     mid_y: float,
     scale: float,
     widget_coll,
+    build_options: Optional[dict] = None,
 ) -> bpy.types.Object:
     mouth_token = f"{char_name}_Mouth"
     box_size = 0.13 * scale
@@ -908,11 +973,337 @@ def _create_mouth_joystick_board(
             (frame_wgt, bar_wgt, joy_wgt),
             box_size,
             bar_gap,
+            build_options=build_options,
         )
     except Exception:
         _discard_partial_board(context, board, widgets)
         raise
     return board
+
+
+def _build_embedded_mmr_rig(
+    context,
+    target_mesh,
+    embed_arm,
+    head_bone_name: str,
+    grouped: dict,
+    face_grouped: dict,
+    primary_vowels: dict,
+    char_name: str,
+    widget_coll,
+    face_scale: float,
+    mouth_scale: float,
+    height_val: float,
+    follow_head_bone: bool,
+    separate_mouth_board: bool,
+    bounds_min: Vector,
+    bounds_max: Vector,
+    mid_y: float,
+    build_options: dict,
+) -> bpy.types.Object:
+    arm_world = embed_arm.matrix_world.copy()
+    inv_arm = arm_world.inverted_safe()
+    s = arm_world.to_scale()
+    arm_scale = max(sum(abs(v) for v in s) / 3.0, 1e-6)
+    rot_inv = arm_world.to_quaternion().to_matrix().inverted()
+    axis_x = (rot_inv @ Vector((1.0, 0.0, 0.0))).normalized()
+    axis_z = (rot_inv @ Vector((0.0, 0.0, 1.0))).normalized()
+    axis_front = (rot_inv @ Vector((0.0, -1.0, 0.0))).normalized()
+
+    local_face_scale = face_scale / arm_scale
+    local_mouth_scale = mouth_scale / arm_scale
+    has_mouth = bool(separate_mouth_board and primary_vowels)
+    active_face_grouped = face_grouped if has_mouth else grouped
+    has_face = bool(active_face_grouped)
+
+    face_layout = None
+    face_origin_local = None
+    if has_face:
+        face_layout = calculate_board_layout(
+            active_face_grouped, scale=local_face_scale, track_height=height_val
+        )
+        if has_mouth:
+            face_world_origin = Vector((
+                bounds_min.x - 0.10 - face_layout.width * arm_scale,
+                mid_y,
+                bounds_max.z - face_layout.height * arm_scale,
+            ))
+        else:
+            face_world_origin = Vector((
+                bounds_max.x + 0.10,
+                mid_y,
+                bounds_max.z - face_layout.height * arm_scale,
+            ))
+        face_origin_local = inv_arm @ face_world_origin
+
+    local_box_size = 0.0
+    local_half = 0.0
+    local_bar_gap = 0.0
+    local_bar_y = 0.0
+    mouth_origin_local = None
+    if has_mouth:
+        local_box_size = 0.13 * local_mouth_scale
+        local_half = local_box_size * 0.5
+        local_bar_gap = 0.020 * local_mouth_scale
+        local_bar_y = local_box_size + local_bar_gap
+        mouth_total_height_world = (local_bar_y + 0.014 * local_mouth_scale) * arm_scale
+        mouth_world_origin = Vector((
+            bounds_max.x + 0.09,
+            mid_y,
+            bounds_max.z - mouth_total_height_world,
+        ))
+        mouth_origin_local = inv_arm @ mouth_world_origin
+
+    owned_bones = []
+    root_bones = []
+    owned_collections = []
+    label_obj_names = []
+    created_widgets = []
+
+    # Mark embedded ownership before mutating so rollback never deletes the host armature.
+    embed_arm["morphrig_embedded"] = True
+    embed_arm["morphrig_board_role"] = "embedded"
+    embed_arm["morphrig_target_mesh"] = target_mesh.name
+    embed_arm["morphrig_char_name"] = char_name
+    embed_arm["morphrig_widget_collection"] = widget_coll.name
+    embed_arm["morphrig_owned_bones"] = json.dumps(owned_bones, ensure_ascii=False)
+    embed_arm["morphrig_root_bones"] = json.dumps(root_bones, ensure_ascii=False)
+    embed_arm["morphrig_owned_collections"] = json.dumps(owned_collections, ensure_ascii=False)
+    embed_arm["morphrig_labels_objects"] = json.dumps(label_obj_names, ensure_ascii=False)
+
+    face_root_name = ""
+    mouth_root_name = ""
+    bone_a_name = ""
+    bone_joy_name = ""
+    face_entries = []
+
+    try:
+        arm_data = embed_arm.data
+        _select_board_only(context, embed_arm)
+        bpy.ops.object.mode_set(mode="EDIT")
+        try:
+            edit_bones = arm_data.edit_bones
+            used_names = set(edit_bones.keys())
+            head_eb = edit_bones.get(head_bone_name) if (follow_head_bone and head_bone_name) else None
+
+            if has_face:
+                face_root_name = _unique_name(EMBEDDED_FACE_ROOT_NAME, used_names)
+                face_root = edit_bones.new(face_root_name)
+                face_root.head = face_origin_local
+                face_root.tail = face_origin_local + (0.05 * local_face_scale) * axis_z
+                face_root.align_roll(axis_front)
+                face_root.use_deform = False
+                if head_eb is not None:
+                    face_root.parent = head_eb
+                    face_root.use_connect = False
+                root_bones.append(face_root_name)
+                owned_bones.append(face_root_name)
+
+                fader_len = 0.012 * local_face_scale
+                for placement in face_layout.faders:
+                    core = f"{placement.row}_{_sanitize_token(placement.label)}"
+                    if placement.side and not core.endswith(f"_{placement.side}"):
+                        core = f"{core}_{placement.side}"
+                    fader_name = _unique_name(f"{FADER_PREFIX}{core}", used_names)
+                    fader = edit_bones.new(fader_name)
+                    fader.head = face_origin_local + placement.x * axis_x + placement.z * axis_z
+                    fader.tail = fader.head + fader_len * axis_x
+                    fader.align_roll(axis_front)
+                    fader.parent = face_root
+                    fader.use_connect = False
+                    fader.use_deform = False
+                    face_entries.append((placement, fader_name))
+                    owned_bones.append(fader_name)
+
+            if has_mouth:
+                mouth_root_name = _unique_name(EMBEDDED_MOUTH_ROOT_NAME, used_names)
+                mouth_root = edit_bones.new(mouth_root_name)
+                mouth_root.head = mouth_origin_local
+                mouth_root.tail = mouth_origin_local + (0.05 * local_mouth_scale) * axis_z
+                mouth_root.align_roll(axis_front)
+                mouth_root.use_deform = False
+                if head_eb is not None:
+                    mouth_root.parent = head_eb
+                    mouth_root.use_connect = False
+                root_bones.append(mouth_root_name)
+                owned_bones.append(mouth_root_name)
+
+                joy_len = 0.018 * local_mouth_scale
+                if "A" in primary_vowels:
+                    bone_a_name = _unique_name("Fader_Vowel_A", used_names)
+                    bone_a = edit_bones.new(bone_a_name)
+                    bone_a.head = mouth_origin_local + local_bar_y * axis_z
+                    bone_a.tail = bone_a.head + joy_len * axis_z
+                    bone_a.align_roll(axis_front)
+                    bone_a.parent = mouth_root
+                    bone_a.use_connect = False
+                    bone_a.use_deform = False
+                    owned_bones.append(bone_a_name)
+
+                if any(key in primary_vowels for key in ("I", "U", "E", "O")):
+                    bone_joy_name = _unique_name("Fader_Vowel_UIEO", used_names)
+                    bone_joy = edit_bones.new(bone_joy_name)
+                    bone_joy.head = mouth_origin_local + local_half * axis_x + local_half * axis_z
+                    bone_joy.tail = bone_joy.head + joy_len * axis_z
+                    bone_joy.align_roll(axis_front)
+                    bone_joy.parent = mouth_root
+                    bone_joy.use_connect = False
+                    bone_joy.use_deform = False
+                    owned_bones.append(bone_joy_name)
+        finally:
+            bpy.ops.object.mode_set(mode="OBJECT")
+            embed_arm["morphrig_owned_bones"] = json.dumps(owned_bones, ensure_ascii=False)
+            embed_arm["morphrig_root_bones"] = json.dumps(root_bones, ensure_ascii=False)
+
+        board_coll_name = f"{EMBEDDED_COLLECTION_PREFIX}{BOARD_COLLECTION}"
+        fader_map = {}
+        driver_bindings = []
+        vowel_entries = []
+
+        if has_face:
+            track_rects = [
+                (p.x, p.z, face_layout.track_height, 0.0048 * local_face_scale)
+                for p in face_layout.faders
+            ]
+            face_frame_wgt = widget_factory.create_board_frame_widget(
+                f"WGT_Board_Frame_{char_name}",
+                0.0,
+                0.0,
+                face_layout.width,
+                face_layout.height,
+                widget_coll,
+                track_rects=track_rects,
+            )
+            face_cap_wgt = widget_factory.create_slider_cap_widget(
+                f"WGT_Slider_Cap_{char_name}", local_face_scale, widget_coll
+            )
+            created_widgets.extend([face_frame_wgt, face_cap_wgt])
+
+            face_root_pb = embed_arm.pose.bones[face_root_name]
+            face_root_pb.custom_shape = face_frame_wgt
+            face_root_pb.use_custom_shape_bone_size = False
+            _assign_visible_collection(
+                arm_data,
+                face_root_pb,
+                board_coll_name,
+                compat.ROW_COLOR_PALETTES["Board"],
+                owned_collections,
+            )
+
+            face_fmap, face_bindings = _bind_face_sliders_pose(
+                embed_arm,
+                target_mesh,
+                face_entries,
+                face_cap_wgt,
+                face_layout.track_height,
+                collection_prefix=EMBEDDED_COLLECTION_PREFIX,
+                owned_collections=owned_collections,
+            )
+            fader_map.update(face_fmap)
+            driver_bindings.extend(face_bindings)
+            vowel_entries.extend((p.row, p.shape_key_name) for p in face_layout.faders)
+
+            face_labels = widget_factory.build_merged_board_labels_object(
+                context,
+                char_name,
+                face_layout.labels,
+                embed_arm,
+                board_root_bone_name=face_root_name,
+                board_root_length=0.05 * local_face_scale,
+                target_collection=context.scene.collection,
+                label_color=(1.0, 1.0, 1.0, 1.0),
+                material_name=widget_factory.LABEL_MAT_FACE,
+                resolution_u=3,
+            )
+            label_obj_names.append(face_labels.name)
+
+        if has_mouth:
+            mouth_token = f"{char_name}_Mouth"
+            mouth_frame_wgt = widget_factory.create_mouth_frame_widget(
+                f"WGT_Mouth_Frame_{mouth_token}", local_box_size, local_bar_gap, widget_coll
+            )
+            created_widgets.append(mouth_frame_wgt)
+            mouth_bar_wgt = None
+            mouth_joy_wgt = None
+            if bone_a_name:
+                mouth_bar_wgt = widget_factory.create_mouth_bar_cap_widget(
+                    f"WGT_Mouth_Bar_{mouth_token}", local_mouth_scale, widget_coll
+                )
+                created_widgets.append(mouth_bar_wgt)
+            if bone_joy_name:
+                mouth_joy_wgt = widget_factory.create_mouth_joystick_widget(
+                    f"WGT_Mouth_Joy_{mouth_token}", local_mouth_scale, widget_coll
+                )
+                created_widgets.append(mouth_joy_wgt)
+
+            mouth_root_pb = embed_arm.pose.bones[mouth_root_name]
+            mouth_root_pb.custom_shape = mouth_frame_wgt
+            mouth_root_pb.use_custom_shape_bone_size = False
+            _assign_visible_collection(
+                arm_data,
+                mouth_root_pb,
+                board_coll_name,
+                compat.ROW_COLOR_PALETTES["Board"],
+                owned_collections,
+            )
+
+            mouth_fmap, mouth_bindings = _bind_mouth_joystick_pose(
+                embed_arm,
+                target_mesh,
+                primary_vowels,
+                local_box_size,
+                mouth_bar_wgt,
+                mouth_joy_wgt,
+                f"{EMBEDDED_COLLECTION_PREFIX}Vowels",
+                bone_a_name=bone_a_name,
+                bone_joy_name=bone_joy_name,
+                owned_collections=owned_collections,
+            )
+            fader_map.update(mouth_fmap)
+            driver_bindings.extend(mouth_bindings)
+            vowel_entries.extend(("Vowels", b["shape_key"]) for b in mouth_bindings)
+
+            mouth_specs = _mouth_label_specs(
+                primary_vowels, local_box_size, local_bar_y, local_mouth_scale
+            )
+            mouth_labels = widget_factory.build_merged_board_labels_object(
+                context,
+                mouth_token,
+                mouth_specs,
+                embed_arm,
+                board_root_bone_name=mouth_root_name,
+                board_root_length=0.05 * local_mouth_scale,
+                target_collection=context.scene.collection,
+                label_color=(1.0, 0.62, 0.18, 1.0),
+                material_name=widget_factory.LABEL_MAT_MOUTH,
+                resolution_u=4,
+            )
+            label_obj_names.append(mouth_labels.name)
+
+        vowel_keys = _collect_vowel_keys(vowel_entries)
+        embed_arm["morphrig_owned_collections"] = json.dumps(owned_collections, ensure_ascii=False)
+        embed_arm["morphrig_labels_objects"] = json.dumps(label_obj_names, ensure_ascii=False)
+        embed_arm["morphrig_labels_object"] = label_obj_names[0] if label_obj_names else ""
+        embed_arm["morphrig_fader_map"] = json.dumps(fader_map, ensure_ascii=False)
+        embed_arm["morphrig_driver_bindings"] = json.dumps(driver_bindings, ensure_ascii=False)
+        embed_arm["morphrig_vowel_keys"] = json.dumps(vowel_keys, ensure_ascii=False)
+        embed_arm["morphrig_track_height"] = float(
+            face_layout.track_height if face_layout is not None else local_box_size
+        )
+        embed_arm["morphrig_mouth_box_size"] = float(local_box_size)
+        embed_arm["morphrig_board_scale"] = float(face_scale if has_face else mouth_scale)
+        embed_arm["morphrig_kuchisync_passthrough"] = False
+        embed_arm["morphrig_build_options"] = json.dumps(build_options, ensure_ascii=False)
+    except Exception:
+        embed_arm["morphrig_owned_collections"] = json.dumps(owned_collections, ensure_ascii=False)
+        embed_arm["morphrig_labels_objects"] = json.dumps(label_obj_names, ensure_ascii=False)
+        remove_facial_board(context, embed_arm)
+        for obj in created_widgets:
+            if _is_alive(obj):
+                _remove_object_with_mesh(obj)
+        raise
+
+    return embed_arm
 
 
 def build_facial_board(
@@ -925,11 +1316,16 @@ def build_facial_board(
     board_scale: float = 1.0,
     track_height: float = 0.12,
     separate_mouth_board: bool = True,
+    merge_into_mmr_rig: bool = True,
 ) -> bpy.types.Object:
     if target_mesh is None or target_mesh.type != "MESH":
         raise ValueError("Target must be a mesh object.")
     if target_mesh.data.shape_keys is None:
         raise ValueError(f"'{target_mesh.name}' has no shape keys.")
+
+    view_layer = getattr(context, "view_layer", None)
+    prev_active = view_layer.objects.active if view_layer is not None else None
+    prev_mode = prev_active.mode if prev_active is not None else "OBJECT"
 
     _ensure_object_mode(context)
     for board in find_all_boards():
@@ -966,17 +1362,82 @@ def build_facial_board(
                 remaining_slots, include_emotes=include_emotes, include_unmapped=include_unmapped
             )
 
+    build_options = {
+        "follow_head_bone": bool(follow_head_bone),
+        "include_emotes": bool(include_emotes),
+        "include_unmapped": bool(include_unmapped),
+        "board_scale": scale,
+        "track_height": height_val,
+        "separate_mouth_board": bool(separate_mouth_board),
+    }
+
+    mmr_info = mmr_bridge.detect_mmr_rig_info(target_mesh)
+    embed_arm = None
+    if (
+        merge_into_mmr_rig
+        and mmr_info.is_mmr_rig
+        and mmr_bridge.is_final_mmr_controller_rig(mmr_info.armature)
+    ):
+        candidate = mmr_info.armature
+        bound_mesh = candidate.get("morphrig_target_mesh")
+        if bound_mesh is None or bound_mesh == target_mesh.name:
+            embed_arm = candidate
+
+    if embed_arm is not None:
+        result = _build_embedded_mmr_rig(
+            context,
+            target_mesh,
+            embed_arm,
+            mmr_info.head_bone_name,
+            grouped,
+            face_grouped,
+            primary_vowels,
+            char_name,
+            widget_coll,
+            face_scale,
+            mouth_scale,
+            height_val,
+            follow_head_bone,
+            separate_mouth_board,
+            bounds_min,
+            bounds_max,
+            mid_y,
+            build_options,
+        )
+        if prev_active is embed_arm and prev_mode == "POSE":
+            _select_board_only(context, embed_arm)
+            bpy.ops.object.mode_set(mode="POSE")
+        context.view_layer.update()
+        return result
+
     created_boards = []
     if separate_mouth_board and primary_vowels:
         if face_grouped:
             face_layout = calculate_board_layout(face_grouped, scale=face_scale, track_height=height_val)
             face_location = Vector((bounds_min.x - 0.10 - face_layout.width, mid_y, bounds_max.z - face_layout.height))
             face_board = _create_single_board(
-                context, target_mesh, face_layout, char_name, char_name, "face", face_location, face_scale, widget_coll
+                context,
+                target_mesh,
+                face_layout,
+                char_name,
+                char_name,
+                "face",
+                face_location,
+                face_scale,
+                widget_coll,
+                build_options=build_options,
             )
             try:
                 mouth_board = _create_mouth_joystick_board(
-                    context, target_mesh, primary_vowels, char_name, bounds_max, mid_y, mouth_scale, widget_coll
+                    context,
+                    target_mesh,
+                    primary_vowels,
+                    char_name,
+                    bounds_max,
+                    mid_y,
+                    mouth_scale,
+                    widget_coll,
+                    build_options=build_options,
                 )
             except Exception:
                 remove_facial_board(context, face_board)
@@ -986,7 +1447,15 @@ def build_facial_board(
             created_boards = [face_board, mouth_board]
         else:
             mouth_board = _create_mouth_joystick_board(
-                context, target_mesh, primary_vowels, char_name, bounds_max, mid_y, mouth_scale, widget_coll
+                context,
+                target_mesh,
+                primary_vowels,
+                char_name,
+                bounds_max,
+                mid_y,
+                mouth_scale,
+                widget_coll,
+                build_options=build_options,
             )
             created_boards = [mouth_board]
     else:
@@ -996,14 +1465,22 @@ def build_facial_board(
         role = "combined" if (has_face and has_mouth) else ("face" if has_face else "mouth")
         board_location = Vector((bounds_max.x + 0.10, mid_y, bounds_max.z - layout.height))
         board = _create_single_board(
-            context, target_mesh, layout, char_name, char_name, role, board_location, face_scale, widget_coll
+            context,
+            target_mesh,
+            layout,
+            char_name,
+            char_name,
+            role,
+            board_location,
+            face_scale,
+            widget_coll,
+            build_options=build_options,
         )
         created_boards = [board]
 
     if follow_head_bone:
-        info = mmr_bridge.detect_mmr_rig_info(target_mesh)
-        mmr_arm = info.armature
-        head_bone_name = info.head_bone_name
+        mmr_arm = mmr_info.armature
+        head_bone_name = mmr_info.head_bone_name
         if mmr_arm is not None and head_bone_name and mmr_arm.pose.bones.get(head_bone_name) is not None:
             for board in created_boards:
                 if mmr_arm is not board:
@@ -1011,6 +1488,52 @@ def build_facial_board(
 
     context.view_layer.update()
     return created_boards[0]
+
+
+def merge_standalone_boards_into_mmr(context, target_mesh=None) -> list:
+    """Embed existing standalone facial boards into their detected final MMR rigs."""
+    standalone = [
+        board
+        for board in find_all_boards()
+        if not bool(board.get("morphrig_embedded", False))
+        and (target_mesh is None or board.get("morphrig_target_mesh") == target_mesh.name)
+    ]
+    if not standalone:
+        return []
+
+    grouped_by_mesh = {}
+    for board in sorted(standalone, key=_board_sort_key):
+        mesh_name = board.get("morphrig_target_mesh", "")
+        if mesh_name:
+            grouped_by_mesh.setdefault(mesh_name, []).append(board)
+
+    merged = []
+    for mesh_name, boards in grouped_by_mesh.items():
+        mesh = bpy.data.objects.get(mesh_name)
+        if mesh is None or mesh.type != "MESH" or mesh.data is None or mesh.data.shape_keys is None:
+            continue
+        mmr_info = mmr_bridge.detect_mmr_rig_info(mesh)
+        if not (mmr_info.is_mmr_rig and mmr_bridge.is_final_mmr_controller_rig(mmr_info.armature)):
+            continue
+        primary = boards[0]
+        build_opts = _load_json(primary, "morphrig_build_options", {})
+        was_passthrough = any(bool(b.get("morphrig_kuchisync_passthrough", False)) for b in boards)
+        embedded_arm = build_facial_board(
+            context,
+            mesh,
+            follow_head_bone=bool(build_opts.get("follow_head_bone", True)),
+            include_emotes=bool(build_opts.get("include_emotes", True)),
+            include_unmapped=bool(build_opts.get("include_unmapped", False)),
+            board_scale=float(build_opts.get("board_scale", 1.0)),
+            track_height=float(build_opts.get("track_height", 0.12)),
+            separate_mouth_board=bool(build_opts.get("separate_mouth_board", True)),
+            merge_into_mmr_rig=True,
+        )
+        if was_passthrough:
+            set_kuchisync_passthrough(embedded_arm, mesh, enabled=True)
+        if embedded_arm not in merged:
+            merged.append(embedded_arm)
+    return merged
 
 
 def _iter_passthrough_bindings(board, vowel_keys: set, fader_map: dict, driver_bindings: list) -> list:
@@ -1118,7 +1641,8 @@ def _rebind_board_vowel_drivers(
             )
         palette = fader_map.get(bone_name, {}).get("palette")
         if not palette:
-            palette = "THEME03" if is_mouth_role else _palette_for(entry.get("row", "Vowels"), entry.get("side", ""))
+            is_mouth_bone = is_mouth_role or bone_name in ("Fader_Vowel_A", "Fader_Vowel_UIEO")
+            palette = "THEME03" if is_mouth_bone else _palette_for(entry.get("row", "Vowels"), entry.get("side", ""))
         compat.set_pose_bone_color(pose_bone, palette)
         updated += 1
 
@@ -1199,21 +1723,24 @@ def clear_board_keyframes(board_armature) -> int:
     return removed
 
 
-def _driver_targets_board(fcurve, board_armature) -> bool:
+def _driver_targets_board(fcurve, board_armature, owned_bones=None) -> bool:
     for variable in fcurve.driver.variables:
         for target in variable.targets:
             if target.id == board_armature:
-                return True
+                if owned_bones is None or target.bone_target in owned_bones:
+                    return True
     return False
 
 
-def _remove_board_drivers(board_armature) -> int:
+def _remove_board_drivers(board_armature, owned_bones=None) -> int:
     removed = 0
     for key in bpy.data.shape_keys:
         anim = key.animation_data
         if anim is None:
             continue
-        stale = [fc for fc in anim.drivers if _driver_targets_board(fc, board_armature)]
+        stale = [
+            fc for fc in anim.drivers if _driver_targets_board(fc, board_armature, owned_bones=owned_bones)
+        ]
         for fcurve in stale:
             anim.drivers.remove(fcurve)
             removed += 1
@@ -1230,53 +1757,108 @@ def _remove_object_with_mesh(obj) -> None:
 
 
 def remove_facial_board(context, board_armature) -> bool:
-    """Delete a board with its drivers, labels, widgets and armature data, leaving no orphans."""
+    """Delete standalone board or strip embedded MorphRig controls without touching host rig data."""
     if not _is_alive(board_armature) or board_armature.type != "ARMATURE":
         return False
     _ensure_object_mode(context)
 
     board_name = board_armature.name
+    is_embedded = bool(board_armature.get("morphrig_embedded", False))
     target_mesh = _resolve_target_mesh(board_armature)
+
+    owned_bones = set(_load_json(board_armature, "morphrig_owned_bones", []))
+    root_bones = set(_load_json(board_armature, "morphrig_root_bones", []))
+    fader_map = _load_json(board_armature, "morphrig_fader_map", {})
+    driver_bindings = _load_json(board_armature, "morphrig_driver_bindings", [])
+    owned_bones.update(root_bones)
+    owned_bones.update(fader_map.keys())
+    owned_bones.update(entry.get("bone", "") for entry in driver_bindings)
+    owned_bones.discard("")
+
     removed_any = False
     if target_mesh is not None and getattr(target_mesh.data, "shape_keys", None) is not None:
-        sk_names = {
-            info.get("shape_key", "")
-            for info in _load_json(board_armature, "morphrig_fader_map", {}).values()
-        }
-        sk_names.update(
-            entry.get("shape_key", "")
-            for entry in _load_json(board_armature, "morphrig_driver_bindings", [])
-        )
+        sk_names = {info.get("shape_key", "") for info in fader_map.values()}
+        sk_names.update(entry.get("shape_key", "") for entry in driver_bindings)
         for sk_name in sk_names:
             if sk_name and compat.remove_shape_key_driver(target_mesh, sk_name):
                 removed_any = True
-    if _remove_board_drivers(board_armature) > 0:
+    driver_bone_filter = owned_bones if is_embedded else None
+    if _remove_board_drivers(board_armature, owned_bones=driver_bone_filter) > 0:
         removed_any = True
     if removed_any and target_mesh is not None and getattr(target_mesh.data, "shape_keys", None) is not None:
         anim = target_mesh.data.shape_keys.animation_data
         if anim is not None and not anim.drivers and anim.action is None and not anim.nla_tracks:
             target_mesh.data.shape_keys.animation_data_clear()
 
+    label_names = set(_load_json(board_armature, "morphrig_labels_objects", []))
     labels_name = board_armature.get("morphrig_labels_object", "")
-    labels = [
-        obj
-        for obj in bpy.data.objects
-        if obj.parent == board_armature
-        and (obj.name == labels_name or obj.name.startswith(widget_factory.LABELS_OBJECT_PREFIX))
-    ]
-    for obj in labels:
-        _remove_object_with_mesh(obj)
+    if labels_name:
+        label_names.add(labels_name)
 
-    widgets = {pb.custom_shape for pb in board_armature.pose.bones if pb.custom_shape is not None}
     widget_coll = bpy.data.collections.get(board_armature.get("morphrig_widget_collection", ""))
 
-    action = board_armature.animation_data.action if board_armature.animation_data else None
-    arm_data = board_armature.data
-    bpy.data.objects.remove(board_armature, do_unlink=True)
-    if arm_data is not None and arm_data.users == 0:
-        bpy.data.armatures.remove(arm_data)
-    if action is not None and action.users == 0:
-        bpy.data.actions.remove(action)
+    if is_embedded:
+        compat.clear_fader_keyframes(board_armature, list(owned_bones))
+        labels = [
+            obj
+            for obj in bpy.data.objects
+            if obj.parent == board_armature
+            and (
+                obj.name in label_names
+                or (
+                    obj.name.startswith(widget_factory.LABELS_OBJECT_PREFIX)
+                    and obj.parent_bone in root_bones
+                )
+            )
+        ]
+        for obj in labels:
+            _remove_object_with_mesh(obj)
+
+        widgets = {
+            board_armature.pose.bones[name].custom_shape
+            for name in owned_bones
+            if name in board_armature.pose.bones and board_armature.pose.bones[name].custom_shape is not None
+        }
+        if owned_bones:
+            _select_board_only(context, board_armature)
+            bpy.ops.object.mode_set(mode="EDIT")
+            try:
+                edit_bones = board_armature.data.edit_bones
+                for bone_name in owned_bones:
+                    eb = edit_bones.get(bone_name)
+                    if eb is not None:
+                        edit_bones.remove(eb)
+            finally:
+                bpy.ops.object.mode_set(mode="OBJECT")
+
+        owned_collections = _load_json(board_armature, "morphrig_owned_collections", [])
+        bone_colls = getattr(board_armature.data, "collections", None)
+        if bone_colls is not None:
+            for coll_name in owned_collections:
+                coll = bone_colls.get(coll_name)
+                if coll is not None:
+                    bone_colls.remove(coll)
+
+        for key in [k for k in list(board_armature.keys()) if k.startswith("morphrig_")]:
+            del board_armature[key]
+    else:
+        labels = [
+            obj
+            for obj in bpy.data.objects
+            if obj.parent == board_armature
+            and (obj.name in label_names or obj.name.startswith(widget_factory.LABELS_OBJECT_PREFIX))
+        ]
+        for obj in labels:
+            _remove_object_with_mesh(obj)
+
+        widgets = {pb.custom_shape for pb in board_armature.pose.bones if pb.custom_shape is not None}
+        action = board_armature.animation_data.action if board_armature.animation_data else None
+        arm_data = board_armature.data
+        bpy.data.objects.remove(board_armature, do_unlink=True)
+        if arm_data is not None and arm_data.users == 0:
+            bpy.data.armatures.remove(arm_data)
+        if action is not None and action.users == 0:
+            bpy.data.actions.remove(action)
 
     remaining_boards = find_all_boards()
     for other in remaining_boards:
