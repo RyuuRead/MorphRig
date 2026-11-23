@@ -24,8 +24,24 @@ LIMIT_CONSTRAINT_NAME = "MorphRig_Limit"
 _MAX_NAME_BYTES = 63
 _CHAR_NAME_BYTES = _MAX_NAME_BYTES - len(widget_factory.WIDGET_COLLECTION_PREFIX) - len("_Mouth")
 MAX_COLS_PER_ROW = 9
+MAX_ROWS_PER_COL = 14
 MOUTH_ROWS = ("Lips", "Vowels")
 FACE_ROWS = ("Eyebrows", "Eyes", "Emotes", "Extra")
+_PRIMARY_VOWELS = ("A", "I", "U", "E", "O")
+_ROW_HEADERS = {
+    "Eyebrows": "EYEBROWS",
+    "Eyes": "EYES",
+    "Lips": "LIPS",
+    "Vowels": "VOWELS",
+    "Emotes": "EMOTES",
+    "Extra": "EXTRAS",
+}
+_MOUTH_JOYSTICK_AXES = {
+    "I": ("LOC_X", 1.0),
+    "U": ("LOC_X", -1.0),
+    "O": ("LOC_Y", 1.0),
+    "E": ("LOC_Y", -1.0),
+}
 _KUCHISYNC_MOUTH_KEYS = frozenset(
     semantic_mapper.normalize_shape_key_name(key) for key in ("ワ", "ワ1", "ワ2", "口")
 )
@@ -38,7 +54,12 @@ class FaderPlacement:
     side: str
     shape_key_name: str
     x: float
-    track_bottom: float
+    z: float
+    is_horizontal: bool = True
+
+    @property
+    def track_bottom(self) -> float:
+        return self.z
 
 
 @dataclass
@@ -57,99 +78,95 @@ def _ordered_rows(grouped: Mapping[str, Sequence[PairedControlGroup]]) -> list:
     return rows
 
 
+def _flatten_category_items(groups: Sequence[PairedControlGroup]) -> list:
+    items = []
+    for group in groups:
+        if group.is_paired:
+            items.append((f"{group.display_label}_R", "R", group.right_slot.shape_key_name))
+            items.append((f"{group.display_label}_L", "L", group.left_slot.shape_key_name))
+            continue
+        slot = group.center_slot or group.right_slot or group.left_slot
+        if slot is not None:
+            items.append((group.display_label, slot.side, slot.shape_key_name))
+    return items
+
+
 def calculate_board_layout(
     grouped: Mapping[str, Sequence[PairedControlGroup]],
     scale: float = 1.0,
     track_height: float = 0.12,
     base_font: Optional[float] = None,
 ) -> BoardLayout:
-    """Lay out rows top to bottom in board space (origin at the bottom-left corner).
-
-    Paired groups put the R track on the viewer-left and the L track on the
-    viewer-right. Rows with more than nine columns wrap onto continuation sub-rows.
-    """
-    pair_spacing = 0.042 * scale
-    col_spacing = 0.075 * scale
+    """Lay out rows into multi-column horizontal sliders (origin at bottom-left)."""
+    max_rows_per_col = MAX_ROWS_PER_COL
+    slot_size = base_font if base_font is not None else 0.020 * scale
+    header_size = 1.25 * slot_size if base_font is not None else 0.025 * scale
+    row_pitch = 0.032 * scale
+    label_col_width = 0.175 * scale
+    col_gap = 0.048 * scale
+    margin = 0.035 * scale
     effective_track_height = track_height * scale
-    header_height = 0.065 * scale
-    row_gap = 0.035 * scale
-    max_cols_per_row = MAX_COLS_PER_ROW
-    margin = 0.03 * scale
-    font = base_font if base_font is not None else 0.012 * scale
+    col_width = label_col_width + effective_track_height
 
-    header_size = 1.35 * font
-    slot_size = 1.0 * font
-    side_size = 0.75 * font
-    header_offset = 0.046 * scale
-    slot_offset = 0.024 * scale
-    side_offset = 0.010 * scale
-    first_column_x = margin + col_spacing * 0.5
-
-    sub_rows = []
+    columns = []
+    cur_col = []
     for row in _ordered_rows(grouped):
-        groups = list(grouped[row])
-        for start in range(0, len(groups), max_cols_per_row):
-            sub_rows.append((row, groups[start:start + max_cols_per_row], start == 0))
+        items = _flatten_category_items(grouped[row])
+        if not items:
+            continue
+        header_text = _ROW_HEADERS.get(row, row.upper())
+        if cur_col and len(cur_col) + 1 + len(items) > max_rows_per_col:
+            columns.append(cur_col)
+            cur_col = []
+        cur_col.append(("header", header_text))
+        for label_text, side, shape_key_name in items:
+            if len(cur_col) >= max_rows_per_col:
+                columns.append(cur_col)
+                cur_col = []
+            cur_col.append(("item", row, label_text, side, shape_key_name))
+    if cur_col:
+        columns.append(cur_col)
 
-    row_count = len(sub_rows)
-    height = 2.0 * margin
-    if row_count:
-        height += row_count * (header_height + effective_track_height) + (row_count - 1) * row_gap
+    max_col_rows = max((len(col) for col in columns), default=0)
+    height = 2.0 * margin + (max_col_rows * row_pitch if max_col_rows else 0.0)
+    num_cols = len(columns)
+    width = (
+        2.0 * margin + num_cols * col_width + max(0, num_cols - 1) * col_gap
+        if num_cols
+        else 0.3 * scale
+    )
 
     layout = BoardLayout(
-        width=0.0,
+        width=width,
         height=height,
         track_height=effective_track_height,
         scale=scale,
     )
-    width = 0.3 * scale
-    y_top = height - margin
-    for row, groups, is_first in sub_rows:
-        track_top = y_top - header_height
-        track_bottom = track_top - effective_track_height
-        if is_first:
-            layout.labels.append(
-                TextLabelSpec(row, margin, track_top + header_offset, header_size, "LEFT")
-            )
-
-        x = first_column_x
-        last_track_x = x
-        for group in groups:
-            if group.is_paired:
-                right_x = x
-                left_x = x + pair_spacing
-                center_x = x + pair_spacing * 0.5
-                layout.faders.append(
-                    FaderPlacement(row, group.display_label, "R", group.right_slot.shape_key_name, right_x, track_bottom)
-                )
-                layout.faders.append(
-                    FaderPlacement(row, group.display_label, "L", group.left_slot.shape_key_name, left_x, track_bottom)
-                )
-                layout.labels.append(TextLabelSpec("R", right_x, track_top + side_offset, side_size, "CENTER"))
-                layout.labels.append(TextLabelSpec("L", left_x, track_top + side_offset, side_size, "CENTER"))
+    for col_idx, col in enumerate(columns):
+        col_x = margin + col_idx * (col_width + col_gap)
+        for row_idx, entry in enumerate(col):
+            row_center_z = height - margin - (row_idx + 0.5) * row_pitch
+            if entry[0] == "header":
                 layout.labels.append(
-                    TextLabelSpec(group.display_label, center_x, track_top + slot_offset, slot_size, "CENTER")
+                    TextLabelSpec(entry[1], col_x, row_center_z - 0.35 * header_size, header_size, "LEFT")
                 )
-                last_track_x = left_x
-                x += pair_spacing + col_spacing
                 continue
-
-            slot = group.center_slot or group.right_slot or group.left_slot
-            if slot is None:
-                continue
-            layout.faders.append(
-                FaderPlacement(row, slot.display_label, slot.side, slot.shape_key_name, x, track_bottom)
-            )
+            _, row_name, label_text, side, shape_key_name = entry
             layout.labels.append(
-                TextLabelSpec(group.display_label, x, track_top + slot_offset, slot_size, "CENTER")
+                TextLabelSpec(label_text, col_x, row_center_z - 0.35 * slot_size, slot_size, "LEFT")
             )
-            last_track_x = x
-            x += col_spacing
+            layout.faders.append(
+                FaderPlacement(
+                    row=row_name,
+                    label=label_text,
+                    side=side,
+                    shape_key_name=shape_key_name,
+                    x=col_x + label_col_width,
+                    z=row_center_z,
+                    is_horizontal=True,
+                )
+            )
 
-        width = max(width, last_track_x + col_spacing * 0.5 + margin)
-        y_top = track_bottom - row_gap
-
-    layout.width = width
     return layout
 
 
@@ -379,12 +396,18 @@ def _parent_to_bone_keep_world(context, child, parent_arm, bone_name: str) -> No
     child.matrix_basis = world
 
 
-def _configure_fader_pose_bone(pose_bone, cap_widget, travel: float) -> None:
+def _configure_constrained_pose_bone(
+    pose_bone,
+    custom_shape,
+    lock_location: tuple[bool, bool, bool],
+    min_xyz: tuple[float, float, float],
+    max_xyz: tuple[float, float, float],
+) -> None:
     pose_bone.rotation_mode = "XYZ"
-    pose_bone.lock_location = (True, False, True)
+    pose_bone.lock_location = lock_location
     pose_bone.lock_rotation = (True, True, True)
     pose_bone.lock_scale = (True, True, True)
-    pose_bone.custom_shape = cap_widget
+    pose_bone.custom_shape = custom_shape
     pose_bone.use_custom_shape_bone_size = False
 
     limit = pose_bone.constraints.new("LIMIT_LOCATION")
@@ -397,12 +420,54 @@ def _configure_fader_pose_bone(pose_bone, cap_widget, travel: float) -> None:
     limit.use_max_y = True
     limit.use_min_z = True
     limit.use_max_z = True
-    limit.min_x = 0.0
-    limit.max_x = 0.0
-    limit.min_y = 0.0
-    limit.max_y = travel
-    limit.min_z = 0.0
-    limit.max_z = 0.0
+    limit.min_x, limit.min_y, limit.min_z = min_xyz
+    limit.max_x, limit.max_y, limit.max_z = max_xyz
+
+
+def _configure_fader_pose_bone(pose_bone, cap_widget, travel: float) -> None:
+    _configure_constrained_pose_bone(
+        pose_bone,
+        cap_widget,
+        (True, False, True),
+        (0.0, 0.0, 0.0),
+        (0.0, travel, 0.0),
+    )
+
+
+def _select_board_only(context, board) -> None:
+    view_layer = context.view_layer
+    for obj in list(view_layer.objects.selected):
+        obj.select_set(False)
+    board.select_set(True)
+    view_layer.objects.active = board
+
+
+def _create_board_object(context, board_token: str, target_mesh, char_name: str, role: str, location: Vector, widget_coll):
+    board_name = f"{BOARD_PREFIX}{board_token}"
+    arm_data = bpy.data.armatures.new(board_name)
+    arm_data.display_type = "STICK"
+    board = bpy.data.objects.new(board_name, arm_data)
+    board.location = location
+    board.show_in_front = True
+    context.scene.collection.objects.link(board)
+
+    board["morphrig_target_mesh"] = target_mesh.name
+    board["morphrig_char_name"] = char_name
+    board["morphrig_board_role"] = role
+    board["morphrig_widget_collection"] = widget_coll.name
+    return board
+
+
+def _collect_vowel_keys(entries) -> list:
+    vowel_keys = []
+    seen = set()
+    for row, sk_name in entries:
+        norm_name = semantic_mapper.normalize_shape_key_name(sk_name)
+        if row == "Vowels" or norm_name in _KUCHISYNC_MOUTH_KEYS:
+            if sk_name not in seen:
+                seen.add(sk_name)
+                vowel_keys.append(sk_name)
+    return vowel_keys
 
 
 def _populate_board(
@@ -422,12 +487,7 @@ def _populate_board(
     root_length = 0.1 * scale
     fader_length = 0.02 * scale
 
-    view_layer = context.view_layer
-    for obj in list(view_layer.objects.selected):
-        obj.select_set(False)
-    board.select_set(True)
-    view_layer.objects.active = board
-
+    _select_board_only(context, board)
     used_names = {BOARD_ROOT_NAME}
     entries = []
     bpy.ops.object.mode_set(mode="EDIT")
@@ -441,24 +501,24 @@ def _populate_board(
 
         for placement in layout.faders:
             core = f"{placement.row}_{_sanitize_token(placement.label)}"
-            if placement.side:
+            if placement.side and not core.endswith(f"_{placement.side}"):
                 core = f"{core}_{placement.side}"
             fader_name = _unique_name(f"{FADER_PREFIX}{core}", used_names)
             track_name = _unique_name(f"{TRACK_PREFIX}{core}", used_names)
 
             track = edit_bones.new(track_name)
-            track.head = (placement.x, 0.0, placement.track_bottom)
-            track.tail = (placement.x, 0.0, placement.track_bottom + travel)
-            track.roll = 0.0
+            track.head = (placement.x, 0.0, placement.z)
+            track.tail = (placement.x + travel, 0.0, placement.z)
+            track.align_roll(Vector((0.0, -1.0, 0.0)))
             track.parent = root
             track.use_connect = False
             track.use_deform = False
             track.hide_select = True
 
             fader = edit_bones.new(fader_name)
-            fader.head = (placement.x, 0.0, placement.track_bottom)
-            fader.tail = (placement.x, 0.0, placement.track_bottom + fader_length)
-            fader.roll = 0.0
+            fader.head = (placement.x, 0.0, placement.z)
+            fader.tail = (placement.x + fader_length, 0.0, placement.z)
+            fader.align_roll(Vector((0.0, -1.0, 0.0)))
             fader.parent = root
             fader.use_connect = False
             fader.use_deform = False
@@ -476,6 +536,7 @@ def _populate_board(
     )
 
     fader_map = {}
+    driver_bindings = []
     for placement, fader_name, track_name in entries:
         track_pb = pose_bones[track_name]
         track_pb.custom_shape = track_wgt
@@ -489,18 +550,35 @@ def _populate_board(
         )
 
         fader_pb = pose_bones[fader_name]
+        palette = _palette_for(placement.row, placement.side)
         _configure_fader_pose_bone(fader_pb, cap_wgt, travel)
-        compat.assign_bone_to_collection(
-            arm_data, fader_pb, placement.row, _palette_for(placement.row, placement.side)
-        )
+        compat.assign_bone_to_collection(arm_data, fader_pb, placement.row, palette)
         fader_map[fader_name] = {
             "shape_key": placement.shape_key_name,
             "row": placement.row,
             "side": placement.side,
+            "palette": palette,
         }
 
     for placement, fader_name, _track_name in entries:
-        compat.bind_fader_driver(target_mesh, placement.shape_key_name, board, fader_name, travel)
+        compat.bind_fader_driver(
+            target_mesh,
+            placement.shape_key_name,
+            board,
+            fader_name,
+            travel,
+            transform_type="LOC_Y",
+            direction=1.0,
+        )
+        driver_bindings.append({
+            "bone": fader_name,
+            "shape_key": placement.shape_key_name,
+            "row": placement.row,
+            "side": placement.side,
+            "axis": "LOC_Y",
+            "travel": float(travel),
+            "direction": 1.0,
+        })
 
     labels_obj = widget_factory.build_merged_board_labels_object(
         context,
@@ -510,21 +588,17 @@ def _populate_board(
         board_root_bone_name=BOARD_ROOT_NAME,
         board_root_length=root_length,
         target_collection=context.scene.collection,
+        label_color=(1.0, 1.0, 1.0, 1.0),
+        material_name=widget_factory.LABEL_MAT_FACE,
     )
 
-    vowel_keys = []
-    seen_vowels = set()
-    for placement in layout.faders:
-        sk_name = placement.shape_key_name
-        norm_name = semantic_mapper.normalize_shape_key_name(sk_name)
-        if placement.row == "Vowels" or norm_name in _KUCHISYNC_MOUTH_KEYS:
-            if sk_name not in seen_vowels:
-                seen_vowels.add(sk_name)
-                vowel_keys.append(sk_name)
-
+    vowel_keys = _collect_vowel_keys(
+        [(placement.row, placement.shape_key_name) for placement in layout.faders]
+    )
     board["morphrig_target_mesh"] = target_mesh.name
     board["morphrig_vowel_keys"] = json.dumps(vowel_keys, ensure_ascii=False)
     board["morphrig_fader_map"] = json.dumps(fader_map, ensure_ascii=False)
+    board["morphrig_driver_bindings"] = json.dumps(driver_bindings, ensure_ascii=False)
     board["morphrig_track_height"] = float(travel)
     board["morphrig_char_name"] = char_name if char_name is not None else board_token
     board["morphrig_widget_collection"] = widget_coll.name
@@ -558,19 +632,7 @@ def _create_single_board(
         f"WGT_Slider_Track_{board_token}", layout.track_height, scale, widget_coll
     )
     cap_wgt = widget_factory.create_slider_cap_widget(f"WGT_Slider_Cap_{board_token}", scale, widget_coll)
-
-    board_name = f"{BOARD_PREFIX}{board_token}"
-    arm_data = bpy.data.armatures.new(board_name)
-    arm_data.display_type = "STICK"
-    board = bpy.data.objects.new(board_name, arm_data)
-    board.location = location
-    board.show_in_front = True
-    context.scene.collection.objects.link(board)
-
-    board["morphrig_target_mesh"] = target_mesh.name
-    board["morphrig_char_name"] = char_name
-    board["morphrig_board_role"] = role
-    board["morphrig_widget_collection"] = widget_coll.name
+    board = _create_board_object(context, board_token, target_mesh, char_name, role, location, widget_coll)
     widgets = (frame_wgt, track_wgt, cap_wgt)
     try:
         _populate_board(
@@ -583,6 +645,250 @@ def _create_single_board(
             widget_coll,
             widgets,
             char_name=char_name,
+        )
+    except Exception:
+        _discard_partial_board(context, board, widgets)
+        raise
+    return board
+
+
+def _extract_primary_vowels(slots: Sequence[ControlSlot]) -> tuple[dict, list]:
+    chosen = {}
+    for slot in slots:
+        if slot.row != "Vowels":
+            continue
+        parts = slot.display_label.strip().split()
+        vowel = parts[0].upper() if parts else ""
+        if vowel not in _PRIMARY_VOWELS:
+            continue
+        prev = chosen.get(vowel)
+        if prev is None or slot.priority < prev.priority:
+            chosen[vowel] = slot
+
+    chosen_ids = {id(slot) for slot in chosen.values()}
+    remaining = [slot for slot in slots if id(slot) not in chosen_ids]
+    return chosen, remaining
+
+
+def _populate_mouth_joystick_board(
+    context,
+    board,
+    target_mesh,
+    primary_vowels: dict,
+    mouth_token: str,
+    char_name: str,
+    scale: float,
+    widget_coll,
+    widgets,
+    box_size: float,
+    bar_gap: float,
+) -> None:
+    arm_data = board.data
+    frame_wgt, bar_wgt, joy_wgt = widgets
+    half = box_size * 0.5
+    bar_y = box_size + bar_gap
+    root_length = 0.08 * scale
+    bone_length = 0.03 * scale
+    has_a = "A" in primary_vowels
+    has_uieo = any(key in primary_vowels for key in ("I", "U", "E", "O"))
+
+    _select_board_only(context, board)
+    bpy.ops.object.mode_set(mode="EDIT")
+    try:
+        edit_bones = arm_data.edit_bones
+        root = edit_bones.new(BOARD_ROOT_NAME)
+        root.head = (0.0, 0.0, 0.0)
+        root.tail = (0.0, 0.0, root_length)
+        root.roll = 0.0
+        root.use_deform = False
+
+        if has_a:
+            bone_a = edit_bones.new("Fader_Vowel_A")
+            bone_a.head = (0.0, 0.0, bar_y)
+            bone_a.tail = (0.0, 0.0, bar_y + bone_length)
+            bone_a.roll = 0.0
+            bone_a.parent = root
+            bone_a.use_connect = False
+            bone_a.use_deform = False
+
+        if has_uieo:
+            bone_joy = edit_bones.new("Fader_Vowel_UIEO")
+            bone_joy.head = (half, 0.0, half)
+            bone_joy.tail = (half, 0.0, half + bone_length)
+            bone_joy.roll = 0.0
+            bone_joy.parent = root
+            bone_joy.use_connect = False
+            bone_joy.use_deform = False
+    finally:
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    pose_bones = board.pose.bones
+    root_pb = pose_bones[BOARD_ROOT_NAME]
+    root_pb.custom_shape = frame_wgt
+    root_pb.use_custom_shape_bone_size = False
+    compat.assign_bone_to_collection(
+        arm_data, root_pb, BOARD_COLLECTION, compat.ROW_COLOR_PALETTES["Board"]
+    )
+
+    fader_map = {}
+    driver_bindings = []
+    if has_a:
+        slot_a = primary_vowels["A"]
+        pb_a = pose_bones["Fader_Vowel_A"]
+        _configure_constrained_pose_bone(
+            pb_a, bar_wgt, (False, True, True), (0.0, 0.0, 0.0), (box_size, 0.0, 0.0)
+        )
+        compat.assign_bone_to_collection(arm_data, pb_a, "Vowels", "THEME03")
+        compat.bind_fader_driver(
+            target_mesh,
+            slot_a.shape_key_name,
+            board,
+            "Fader_Vowel_A",
+            box_size,
+            transform_type="LOC_X",
+            direction=1.0,
+        )
+        fader_map["Fader_Vowel_A"] = {
+            "shape_key": slot_a.shape_key_name,
+            "row": "Vowels",
+            "side": slot_a.side,
+            "palette": "THEME03",
+        }
+        driver_bindings.append({
+            "bone": "Fader_Vowel_A",
+            "shape_key": slot_a.shape_key_name,
+            "row": "Vowels",
+            "side": slot_a.side,
+            "axis": "LOC_X",
+            "travel": float(box_size),
+            "direction": 1.0,
+        })
+
+    if has_uieo:
+        pb_joy = pose_bones["Fader_Vowel_UIEO"]
+        _configure_constrained_pose_bone(
+            pb_joy, joy_wgt, (False, False, True), (-half, -half, 0.0), (half, half, 0.0)
+        )
+        compat.assign_bone_to_collection(arm_data, pb_joy, "Vowels", "THEME03")
+        first_uieo_slot = None
+        for vowel in ("I", "U", "O", "E"):
+            slot = primary_vowels.get(vowel)
+            if slot is None:
+                continue
+            if first_uieo_slot is None:
+                first_uieo_slot = slot
+            axis, direction = _MOUTH_JOYSTICK_AXES[vowel]
+            compat.bind_fader_driver(
+                target_mesh,
+                slot.shape_key_name,
+                board,
+                "Fader_Vowel_UIEO",
+                half,
+                transform_type=axis,
+                direction=direction,
+            )
+            driver_bindings.append({
+                "bone": "Fader_Vowel_UIEO",
+                "shape_key": slot.shape_key_name,
+                "row": "Vowels",
+                "side": slot.side,
+                "axis": axis,
+                "travel": float(half),
+                "direction": float(direction),
+            })
+        if first_uieo_slot is not None:
+            fader_map["Fader_Vowel_UIEO"] = {
+                "shape_key": first_uieo_slot.shape_key_name,
+                "row": "Vowels",
+                "side": first_uieo_slot.side,
+                "palette": "THEME03",
+            }
+
+    font_size = 0.030 * scale
+    label_specs = []
+    if has_a:
+        label_specs.append(TextLabelSpec("a", -0.024 * scale, bar_y - 0.008 * scale, font_size, "RIGHT"))
+    if "O" in primary_vowels:
+        label_specs.append(TextLabelSpec("o", half, box_size - 0.030 * scale, font_size, "CENTER"))
+    if "E" in primary_vowels:
+        label_specs.append(TextLabelSpec("e", half, 0.012 * scale, font_size, "CENTER"))
+    if "U" in primary_vowels:
+        label_specs.append(TextLabelSpec("u", 0.022 * scale, half - 0.010 * scale, font_size, "CENTER"))
+    if "I" in primary_vowels:
+        label_specs.append(TextLabelSpec("i", box_size - 0.022 * scale, half - 0.010 * scale, font_size, "CENTER"))
+
+    labels_obj = widget_factory.build_merged_board_labels_object(
+        context,
+        mouth_token,
+        label_specs,
+        board,
+        board_root_bone_name=BOARD_ROOT_NAME,
+        board_root_length=root_length,
+        target_collection=context.scene.collection,
+        label_color=(1.0, 0.62, 0.18, 1.0),
+        material_name=widget_factory.LABEL_MAT_MOUTH,
+    )
+
+    vowel_keys = _collect_vowel_keys(
+        [("Vowels", binding["shape_key"]) for binding in driver_bindings]
+    )
+    board["morphrig_target_mesh"] = target_mesh.name
+    board["morphrig_vowel_keys"] = json.dumps(vowel_keys, ensure_ascii=False)
+    board["morphrig_fader_map"] = json.dumps(fader_map, ensure_ascii=False)
+    board["morphrig_driver_bindings"] = json.dumps(driver_bindings, ensure_ascii=False)
+    board["morphrig_track_height"] = float(box_size)
+    board["morphrig_char_name"] = char_name
+    board["morphrig_widget_collection"] = widget_coll.name
+    board["morphrig_labels_object"] = labels_obj.name
+    board["morphrig_board_scale"] = scale
+    board["morphrig_kuchisync_passthrough"] = False
+
+
+def _create_mouth_joystick_board(
+    context,
+    target_mesh,
+    primary_vowels: dict,
+    char_name: str,
+    bounds_max: Vector,
+    mid_y: float,
+    scale: float,
+    widget_coll,
+) -> bpy.types.Object:
+    mouth_token = f"{char_name}_Mouth"
+    box_size = 0.22 * scale
+    bar_gap = 0.032 * scale
+    bar_y = box_size + bar_gap
+    total_height = bar_y + 0.02 * scale
+    location = Vector((bounds_max.x + 0.14, mid_y, bounds_max.z - total_height))
+
+    frame_wgt = widget_factory.create_mouth_frame_widget(
+        f"WGT_Mouth_Frame_{mouth_token}", box_size, bar_gap, widget_coll
+    )
+    bar_wgt = (
+        widget_factory.create_mouth_bar_cap_widget(f"WGT_Mouth_Bar_{mouth_token}", scale, widget_coll)
+        if "A" in primary_vowels
+        else None
+    )
+    joy_wgt = (
+        widget_factory.create_mouth_joystick_widget(f"WGT_Mouth_Joy_{mouth_token}", scale, widget_coll)
+        if any(key in primary_vowels for key in ("I", "U", "E", "O"))
+        else None
+    )
+    board = _create_board_object(context, mouth_token, target_mesh, char_name, "mouth", location, widget_coll)
+    widgets = tuple(obj for obj in (frame_wgt, bar_wgt, joy_wgt) if obj is not None)
+    try:
+        _populate_mouth_joystick_board(
+            context,
+            board,
+            target_mesh,
+            primary_vowels,
+            mouth_token,
+            char_name,
+            scale,
+            widget_coll,
+            (frame_wgt, bar_wgt, joy_wgt),
+            box_size,
+            bar_gap,
         )
     except Exception:
         _discard_partial_board(context, board, widgets)
@@ -630,44 +936,43 @@ def build_facial_board(
     mid_y = (bounds_min.y + bounds_max.y) / 2.0
     widget_coll = widget_factory.ensure_widget_collection(context, char_name)
 
-    face_grouped = {row: groups for row, groups in grouped.items() if row not in MOUTH_ROWS and groups}
-    mouth_grouped = {row: groups for row, groups in grouped.items() if row in MOUTH_ROWS and groups}
-
-    if separate_mouth_board and face_grouped and mouth_grouped:
-        face_layout = calculate_board_layout(face_grouped, scale=scale, track_height=height_val)
-        mouth_layout = calculate_board_layout(mouth_grouped, scale=scale, track_height=height_val)
-        face_location = Vector((bounds_max.x + 0.18, mid_y, bounds_max.z - face_layout.height))
-        mouth_location = Vector((
-            bounds_max.x + 0.18 + face_layout.width + 0.08 * scale,
-            mid_y,
-            bounds_max.z - mouth_layout.height,
-        ))
-
-        face_board = _create_single_board(
-            context, target_mesh, face_layout, char_name, char_name, "face", face_location, scale, widget_coll
-        )
-        try:
-            mouth_board = _create_single_board(
-                context,
-                target_mesh,
-                mouth_layout,
-                f"{char_name}_Mouth",
-                char_name,
-                "mouth",
-                mouth_location,
-                scale,
-                widget_coll,
+    primary_vowels = {}
+    face_grouped = grouped
+    if separate_mouth_board:
+        primary_vowels, remaining_slots = _extract_primary_vowels(slots)
+        if primary_vowels:
+            face_grouped = semantic_mapper.group_control_slots(
+                remaining_slots, include_emotes=include_emotes, include_unmapped=include_unmapped
             )
-        except Exception:
-            remove_facial_board(context, face_board)
-            raise
 
-        face_board["morphrig_companion_board"] = mouth_board.name
-        mouth_board["morphrig_companion_board"] = face_board.name
-        created_boards = [face_board, mouth_board]
+    created_boards = []
+    if separate_mouth_board and primary_vowels:
+        if face_grouped:
+            face_layout = calculate_board_layout(face_grouped, scale=scale, track_height=height_val)
+            face_location = Vector((bounds_min.x - 0.18 - face_layout.width, mid_y, bounds_max.z - face_layout.height))
+            face_board = _create_single_board(
+                context, target_mesh, face_layout, char_name, char_name, "face", face_location, scale, widget_coll
+            )
+            try:
+                mouth_board = _create_mouth_joystick_board(
+                    context, target_mesh, primary_vowels, char_name, bounds_max, mid_y, scale, widget_coll
+                )
+            except Exception:
+                remove_facial_board(context, face_board)
+                raise
+            face_board["morphrig_companion_board"] = mouth_board.name
+            mouth_board["morphrig_companion_board"] = face_board.name
+            created_boards = [face_board, mouth_board]
+        else:
+            mouth_board = _create_mouth_joystick_board(
+                context, target_mesh, primary_vowels, char_name, bounds_max, mid_y, scale, widget_coll
+            )
+            created_boards = [mouth_board]
     else:
         layout = calculate_board_layout(grouped, scale=scale, track_height=height_val)
-        role = "combined" if (face_grouped and mouth_grouped) else ("face" if face_grouped else "mouth")
+        has_face = any(row not in MOUTH_ROWS and groups for row, groups in grouped.items())
+        has_mouth = any(row in MOUTH_ROWS and groups for row, groups in grouped.items())
+        role = "combined" if (has_face and has_mouth) else ("face" if has_face else "mouth")
         board_location = Vector((bounds_max.x + 0.18, mid_y, bounds_max.z - layout.height))
         board = _create_single_board(
             context, target_mesh, layout, char_name, char_name, role, board_location, scale, widget_coll
@@ -687,21 +992,49 @@ def build_facial_board(
     return created_boards[0]
 
 
-def _release_board_vowel_drivers(board, target_mesh, vowel_keys: set, fader_map: dict) -> int:
+def _iter_passthrough_bindings(board, vowel_keys: set, fader_map: dict, driver_bindings: list) -> list:
+    if driver_bindings:
+        return [
+            entry
+            for entry in driver_bindings
+            if entry.get("row") == "Vowels" or entry.get("shape_key") in vowel_keys
+        ]
+    default_travel = float(board.get("morphrig_track_height", 0.12))
+    return [
+        {
+            "bone": fader_name,
+            "shape_key": info.get("shape_key", ""),
+            "row": info.get("row", "Vowels"),
+            "side": info.get("side", ""),
+            "axis": "LOC_Y",
+            "travel": default_travel,
+            "direction": 1.0,
+        }
+        for fader_name, info in fader_map.items()
+        if info.get("row") == "Vowels" or info.get("shape_key") in vowel_keys
+    ]
+
+
+def _release_board_vowel_drivers(
+    board,
+    target_mesh,
+    vowel_keys: set,
+    fader_map: dict,
+    driver_bindings: list,
+) -> int:
     shape_keys = getattr(getattr(target_mesh, "data", None), "shape_keys", None)
     key_blocks = shape_keys.key_blocks if shape_keys is not None else None
     release_keys = set(vowel_keys)
     updated = 0
 
-    for fader_name, info in fader_map.items():
-        sk_name = info.get("shape_key", "")
-        if info.get("row") != "Vowels" and sk_name not in vowel_keys:
-            continue
+    for entry in _iter_passthrough_bindings(board, vowel_keys, fader_map, driver_bindings):
+        sk_name = entry.get("shape_key", "")
+        bone_name = entry.get("bone", "")
         removed = False
         if sk_name:
             release_keys.add(sk_name)
             removed = compat.remove_shape_key_driver(target_mesh, sk_name)
-        pose_bone = board.pose.bones.get(fader_name)
+        pose_bone = board.pose.bones.get(bone_name)
         if pose_bone is not None:
             compat.set_pose_bone_color(pose_bone, compat.ROW_COLOR_PALETTES["MUTED"])
         if pose_bone is not None or removed:
@@ -730,24 +1063,42 @@ def _release_board_vowel_drivers(board, target_mesh, vowel_keys: set, fader_map:
     return updated
 
 
-def _rebind_board_vowel_drivers(board, target_mesh, vowel_keys: set, fader_map: dict) -> int:
+def _rebind_board_vowel_drivers(
+    board,
+    target_mesh,
+    vowel_keys: set,
+    fader_map: dict,
+    driver_bindings: list,
+) -> int:
     shape_keys = getattr(getattr(target_mesh, "data", None), "shape_keys", None)
     key_blocks = shape_keys.key_blocks if shape_keys is not None else None
-    track_height = float(board.get("morphrig_track_height", 0.12))
+    default_travel = float(board.get("morphrig_track_height", 0.12))
+    is_mouth_role = board.get("morphrig_board_role") == "mouth"
     updated = 0
 
-    for fader_name, info in fader_map.items():
-        sk_name = info.get("shape_key", "")
-        if info.get("row") != "Vowels" and sk_name not in vowel_keys:
-            continue
-        pose_bone = board.pose.bones.get(fader_name)
+    for entry in _iter_passthrough_bindings(board, vowel_keys, fader_map, driver_bindings):
+        bone_name = entry.get("bone", "")
+        sk_name = entry.get("shape_key", "")
+        axis = entry.get("axis", "LOC_Y")
+        travel = float(entry.get("travel", default_travel))
+        direction = float(entry.get("direction", 1.0))
+        pose_bone = board.pose.bones.get(bone_name)
         if pose_bone is None:
             continue
         if sk_name and key_blocks is not None and key_blocks.get(sk_name) is not None:
-            compat.bind_fader_driver(target_mesh, sk_name, board, fader_name, track_height)
-        compat.set_pose_bone_color(
-            pose_bone, _palette_for(info.get("row", "Vowels"), info.get("side", ""))
-        )
+            compat.bind_fader_driver(
+                target_mesh,
+                sk_name,
+                board,
+                bone_name,
+                travel,
+                transform_type=axis,
+                direction=direction,
+            )
+        palette = fader_map.get(bone_name, {}).get("palette")
+        if not palette:
+            palette = "THEME03" if is_mouth_role else _palette_for(entry.get("row", "Vowels"), entry.get("side", ""))
+        compat.set_pose_bone_color(pose_bone, palette)
         updated += 1
 
     return updated
@@ -765,10 +1116,15 @@ def set_kuchisync_passthrough(board_armature, target_mesh=None, enabled: bool = 
         board_mesh = _resolve_target_mesh(board, target_mesh)
         vowel_keys = set(_load_json(board, "morphrig_vowel_keys", []))
         fader_map = _load_json(board, "morphrig_fader_map", {})
+        driver_bindings = _load_json(board, "morphrig_driver_bindings", [])
         if release:
-            updated += _release_board_vowel_drivers(board, board_mesh, vowel_keys, fader_map)
+            updated += _release_board_vowel_drivers(
+                board, board_mesh, vowel_keys, fader_map, driver_bindings
+            )
         else:
-            updated += _rebind_board_vowel_drivers(board, board_mesh, vowel_keys, fader_map)
+            updated += _rebind_board_vowel_drivers(
+                board, board_mesh, vowel_keys, fader_map, driver_bindings
+            )
         board["morphrig_kuchisync_passthrough"] = release
 
     ctx = getattr(bpy, "context", None)
@@ -800,7 +1156,14 @@ def key_all_sliders(context, board_armature, frame=None) -> int:
     for board in boards:
         for name in _fader_names(board):
             pose_bone = board.pose.bones[name]
-            if pose_bone.keyframe_insert(data_path="location", index=1, frame=float(frame), group=name):
+            keyed = False
+            for axis_idx in (0, 1):
+                if not pose_bone.lock_location[axis_idx]:
+                    if pose_bone.keyframe_insert(
+                        data_path="location", index=axis_idx, frame=float(frame), group=name
+                    ):
+                        keyed = True
+            if keyed:
                 count += 1
     return count
 
@@ -855,8 +1218,16 @@ def remove_facial_board(context, board_armature) -> bool:
     target_mesh = _resolve_target_mesh(board_armature)
     removed_any = False
     if target_mesh is not None and getattr(target_mesh.data, "shape_keys", None) is not None:
-        for info in _load_json(board_armature, "morphrig_fader_map", {}).values():
-            if compat.remove_shape_key_driver(target_mesh, info.get("shape_key", "")):
+        sk_names = {
+            info.get("shape_key", "")
+            for info in _load_json(board_armature, "morphrig_fader_map", {}).values()
+        }
+        sk_names.update(
+            entry.get("shape_key", "")
+            for entry in _load_json(board_armature, "morphrig_driver_bindings", [])
+        )
+        for sk_name in sk_names:
+            if sk_name and compat.remove_shape_key_driver(target_mesh, sk_name):
                 removed_any = True
     if _remove_board_drivers(board_armature) > 0:
         removed_any = True
@@ -910,4 +1281,6 @@ def remove_facial_board(context, board_armature) -> bool:
                 _remove_object_with_mesh(obj)
         if not widget_coll.objects and not widget_coll.children:
             bpy.data.collections.remove(widget_coll)
+
+    widget_factory.cleanup_unused_label_materials()
     return True

@@ -103,6 +103,8 @@ def bind_fader_driver(
     board_armature,
     fader_bone_name: str,
     track_len: float,
+    transform_type: str = "LOC_Y",
+    direction: float = 1.0,
 ):
     if target_mesh is None or target_mesh.data is None:
         raise ValueError("target_mesh must be a valid mesh object")
@@ -129,7 +131,7 @@ def bind_fader_driver(
     target = var.targets[0]
     target.id = board_armature
     target.bone_target = fader_bone_name
-    target.transform_type = "LOC_Y"
+    target.transform_type = transform_type
     target.transform_space = "LOCAL_SPACE"
 
     while fcurve.modifiers:
@@ -141,7 +143,7 @@ def bind_fader_driver(
     mod.mode = "POLYNOMIAL"
     mod.poly_order = 1
     mod.coefficients[0] = 0.0
-    mod.coefficients[1] = 1.0 / max(float(track_len), 1e-6)
+    mod.coefficients[1] = float(direction) / max(float(track_len), 1e-6)
 
     fcurve.update()
     return fcurve

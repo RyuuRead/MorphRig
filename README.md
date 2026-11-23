@@ -52,10 +52,11 @@ The mapper supports Japanese (MMD/VRoid), Chinese (Hoyoverse/Bilibili), and Engl
 ## Procedural 3D Viewport board operation
 
 - Select a mesh with shape keys and click **Generate facial board** in the N-Panel.
-- MorphRig generates custom 3D mesh widgets (frames, tracks, fader handles, and 3D text labels converted to mesh) procedurally via the Blender Python API.
-- With **Separate mouth board** enabled (the default), MorphRig splits `Lips` and `Vowels` onto an adjacent `MorphRig_Board_<Character>_Mouth` armature beside the main face board.
-- In Pose Mode, select any fader bone and press `G` to slide it vertically along its local Y axis. X/Z translation, rotation, and scale are locked, and a `LIMIT_LOCATION` constraint clamps movement to the track length.
-- Shape key drivers use `AVERAGE` driver type with a linear `FModifierGenerator` (`poly_order = 1`, `coefficients = (0.0, 1.0 / track_len)`), so drivers evaluate without triggering Blender's Auto Run Python Scripts security warning.
+- MorphRig generates custom 3D mesh widgets (frames, tracks, fader handles, and readable white Emission 3D text labels converted to mesh) procedurally via the Blender Python API.
+- The multi-column horizontal slider Face Board is placed to the left of the character (`-X`) when **Separate mouth board** is enabled (or on `+X` when combined).
+- With **Separate mouth board** enabled (the default), MorphRig places a 2D Mouth Joystick Rig (`MorphRig_Board_<Character>_Mouth`) to the right of the character (`+X`), pairing the top `a` horizontal bar (`LOC_X`) and the lower 2D `o / u / i / e` joystick box (`LOC_X`, `LOC_Y`).
+- In Pose Mode, select a Face Board slider bar and move it along its horizontal track (`G` along local Y / world X), or drag the Mouth Rig `a` bar left-to-right and the 2D `o/u/i/e` ring across X and Z. Non-driving axes, rotation, and scale are locked, and `LIMIT_LOCATION` constraints clamp travel to each track or joystick box.
+- Shape key drivers use `AVERAGE` driver type with a linear `FModifierGenerator` (`poly_order = 1`, `coefficients = (0.0, direction / track_len)`), so drivers evaluate without triggering Blender's Auto Run Python Scripts security warning.
 
 ## KuchiSync passthrough
 
