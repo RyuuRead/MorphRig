@@ -32,6 +32,14 @@ def _resolve_target_mesh(
         if auto_assign:
             settings.target_mesh = active_obj
         return active_obj
+    if active_obj is not None and active_obj.type == "ARMATURE":
+        from .mmr_bridge import find_face_mesh_for_armature
+
+        mesh_obj = find_face_mesh_for_armature(active_obj, context.scene)
+        if _is_valid_target_mesh(mesh_obj):
+            if auto_assign:
+                settings.target_mesh = mesh_obj
+            return mesh_obj
     return None
 
 
@@ -42,8 +50,11 @@ def _find_board_in_scene(
     scene = getattr(context, "scene", None)
     if scene is None:
         return None
-    fallback_board = None
     target_name = target_mesh.name if target_mesh is not None else ""
+    matched_primary = None
+    matched_mouth = None
+    fallback_primary = None
+    fallback_mouth = None
     for obj in scene.objects:
         if obj.type != "ARMATURE":
             continue
@@ -52,11 +63,38 @@ def _find_board_in_scene(
         )
         if not is_board:
             continue
+        is_mouth = (
+            obj.get("morphrig_board_role", "") == "mouth"
+            or obj.name.endswith("_Mouth")
+        )
         if target_name and obj.get("morphrig_target_mesh", "") == target_name:
-            return obj
-        if fallback_board is None:
-            fallback_board = obj
-    return fallback_board
+            if not is_mouth:
+                matched_primary = obj
+                break
+            if matched_mouth is None:
+                matched_mouth = obj
+        else:
+            if not is_mouth and fallback_primary is None:
+                fallback_primary = obj
+            elif is_mouth and fallback_mouth is None:
+                fallback_mouth = obj
+    return matched_primary or matched_mouth or fallback_primary or fallback_mouth
+
+
+def _set_kuchisync_flag(settings, value: bool) -> None:
+    if settings is None:
+        return
+    import sys
+
+    pkg = sys.modules.get(__package__)
+    if pkg is None:
+        settings.kuchisync_passthrough = value
+        return
+    pkg._syncing_kuchisync = True
+    try:
+        settings.kuchisync_passthrough = value
+    finally:
+        pkg._syncing_kuchisync = False
 
 
 def _build_slots_override(settings, target_mesh: bpy.types.Object):
@@ -160,12 +198,13 @@ class MORPHRIG_OT_generate_board(bpy.types.Operator):
                 include_unmapped=settings.include_unmapped_keys,
                 board_scale=settings.board_scale,
                 track_height=settings.track_height,
+                separate_mouth_board=settings.separate_mouth_board,
             )
         except (ValueError, RuntimeError) as exc:
             self.report({"WARNING"}, str(exc))
             return {"CANCELLED"}
 
-        settings.kuchisync_passthrough = False
+        _set_kuchisync_flag(settings, False)
         self.report(
             {"INFO"},
             f"Generated facial board '{board.name}' for '{target_mesh.name}'.",
@@ -175,8 +214,8 @@ class MORPHRIG_OT_generate_board(bpy.types.Operator):
 
 class MORPHRIG_OT_toggle_kuchisync(bpy.types.Operator):
     bl_idname = "morphrig.toggle_kuchisync"
-    bl_label = "KuchiSync passthrough (mute vowel drivers)"
-    bl_description = "Mute or unmute vowel shape key drivers so KuchiSync can animate lip-sync directly"
+    bl_label = "KuchiSync passthrough (release vowel drivers)"
+    bl_description = "Release or re-bind vowel shape key drivers so KuchiSync can write lip-sync keyframes directly"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context: bpy.types.Context):
@@ -199,7 +238,7 @@ class MORPHRIG_OT_toggle_kuchisync(bpy.types.Operator):
             target_mesh,
             enabled=new_state,
         )
-        settings.kuchisync_passthrough = new_state
+        _set_kuchisync_flag(settings, new_state)
 
         status_text = "enabled" if new_state else "disabled"
         self.report(
@@ -321,12 +360,13 @@ class MORPHRIG_OT_rebuild_board(bpy.types.Operator):
                 include_unmapped=settings.include_unmapped_keys,
                 board_scale=settings.board_scale,
                 track_height=settings.track_height,
+                separate_mouth_board=settings.separate_mouth_board,
             )
         except (ValueError, RuntimeError) as exc:
             self.report({"WARNING"}, str(exc))
             return {"CANCELLED"}
 
-        settings.kuchisync_passthrough = False
+        _set_kuchisync_flag(settings, False)
         self.report({"INFO"}, f"Rebuilt facial board '{board.name}'.")
         return {"FINISHED"}
 
@@ -343,23 +383,29 @@ class MORPHRIG_OT_remove_board(bpy.types.Operator):
         from . import rig_builder
 
         target_mesh = _resolve_target_mesh(context, auto_assign=False)
-        board = rig_builder.find_board_for_mesh(context, target_mesh)
-        if board is None:
-            self.report({"WARNING"}, "No MorphRig facial board found to remove.")
+        removed_count = 0
+        if target_mesh is not None:
+            removed_count = rig_builder.remove_boards_for_mesh(context, target_mesh)
+
+        if removed_count == 0:
+            boards = rig_builder.find_boards_for_mesh(context, target_mesh)
+            if not boards:
+                self.report({"WARNING"}, "No MorphRig facial board found to remove.")
+                return {"CANCELLED"}
+            for board in boards:
+                if rig_builder.remove_facial_board(context, board):
+                    removed_count += 1
+
+        _set_kuchisync_flag(settings, False)
+
+        if removed_count == 0:
+            self.report({"WARNING"}, "Could not remove MorphRig facial board.")
             return {"CANCELLED"}
 
-        board_name = board.name
-        removed = rig_builder.remove_facial_board(context, board)
-        if settings is not None:
-            settings.kuchisync_passthrough = False
-
-        if not removed:
-            self.report({"WARNING"}, f"Could not remove facial board '{board_name}'.")
-            return {"CANCELLED"}
-
+        noun = "board" if removed_count == 1 else "boards"
         self.report(
             {"INFO"},
-            f"Removed facial board '{board_name}' and cleaned drivers.",
+            f"Removed {removed_count} facial {noun} and cleaned drivers.",
         )
         return {"FINISHED"}
 
@@ -398,11 +444,25 @@ class MORPHRIG_PT_main_panel(bpy.types.Panel):
             )
             return
 
+        try:
+            self._draw_panel_body(context, layout, settings)
+        except Exception as exc:
+            err_box = layout.box()
+            err_box.label(
+                text=f"MorphRig UI error: {exc}",
+                icon=safe_icon("ERROR"),
+            )
+
+    def _draw_panel_body(self, context: bpy.types.Context, layout, settings):
         target_mesh = _resolve_target_mesh(context, auto_assign=False)
+        active_obj = getattr(context, "active_object", None)
+        mmr_probe = target_mesh
+        if mmr_probe is None and active_obj is not None and active_obj.type == "ARMATURE":
+            mmr_probe = active_obj
 
         from . import mmr_bridge
 
-        mmr_info = mmr_bridge.detect_mmr_rig_info(target_mesh)
+        mmr_info = mmr_bridge.detect_mmr_rig_info(mmr_probe)
 
         box1 = layout.box()
         header1 = box1.row()
@@ -510,6 +570,7 @@ class MORPHRIG_PT_main_panel(bpy.types.Panel):
         )
         col2 = box2.column(align=True)
         col2.prop(settings, "follow_head_bone", text="Follow head bone")
+        col2.prop(settings, "separate_mouth_board", text="Separate mouth board")
         col2.prop(settings, "include_emotes_row", text="Include emotes row")
         col2.prop(settings, "include_unmapped_keys", text="Include unmapped keys")
         box2.prop(settings, "board_scale", text="Board scale", slider=True)
@@ -537,7 +598,7 @@ class MORPHRIG_PT_main_panel(bpy.types.Panel):
             ks_row = box3.row()
             ks_row.operator(
                 "morphrig.toggle_kuchisync",
-                text="KuchiSync passthrough (mute vowel drivers)",
+                text="KuchiSync passthrough (release vowel drivers)",
                 icon=ks_icon,
                 depress=ks_enabled,
             )

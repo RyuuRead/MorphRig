@@ -53,6 +53,7 @@ The mapper supports Japanese (MMD/VRoid), Chinese (Hoyoverse/Bilibili), and Engl
 
 - Select a mesh with shape keys and click **Generate facial board** in the N-Panel.
 - MorphRig generates custom 3D mesh widgets (frames, tracks, fader handles, and 3D text labels converted to mesh) procedurally via the Blender Python API.
+- With **Separate mouth board** enabled (the default), MorphRig splits `Lips` and `Vowels` onto an adjacent `MorphRig_Board_<Character>_Mouth` armature beside the main face board.
 - In Pose Mode, select any fader bone and press `G` to slide it vertically along its local Y axis. X/Z translation, rotation, and scale are locked, and a `LIMIT_LOCATION` constraint clamps movement to the track length.
 - Shape key drivers use `AVERAGE` driver type with a linear `FModifierGenerator` (`poly_order = 1`, `coefficients = (0.0, 1.0 / track_len)`), so drivers evaluate without triggering Blender's Auto Run Python Scripts security warning.
 
@@ -60,9 +61,10 @@ The mapper supports Japanese (MMD/VRoid), Chinese (Hoyoverse/Bilibili), and Engl
 
 To use KuchiSync for automated lip-sync while keeping MorphRig active for facial expressions:
 
-1. Enable **KuchiSync passthrough (mute vowel drivers)** in the MorphRig N-Panel.
-2. MorphRig mutes the drivers on the `Vowels` row (`A`, `I`, `U`, `E`, `O`, `N`), allowing KuchiSync to write lip-sync keyframes directly to those shape keys.
+1. Enable **KuchiSync passthrough (release vowel drivers)** in the MorphRig N-Panel.
+2. MorphRig releases (detaches) the drivers on the `Vowels` row (`A`, `I`, `U`, `E`, `O`, `N`), allowing KuchiSync to write lip-sync keyframes directly to those shape keys without driver interference.
 3. All non-vowel facial sliders (`Eyebrows`, `Eyes`, `Lips`, `Emotes`, `Extra`) remain active.
+4. Disable **KuchiSync passthrough (release vowel drivers)** when finished to re-bind the vowel drivers to their board faders.
 
 ## Verification
 

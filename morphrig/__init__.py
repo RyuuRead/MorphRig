@@ -56,17 +56,22 @@ def _poll_target_mesh(self, obj):
 
 
 def _on_kuchisync_passthrough_updated(self, context):
+    global _syncing_kuchisync
     if _syncing_kuchisync:
         return
-    from . import rig_builder
+    _syncing_kuchisync = True
+    try:
+        from . import rig_builder
 
-    board = rig_builder.find_board_for_mesh(context, self.target_mesh)
-    if board is not None:
-        rig_builder.set_kuchisync_passthrough(
-            board,
-            self.target_mesh,
-            self.kuchisync_passthrough,
-        )
+        board = rig_builder.find_board_for_mesh(context, self.target_mesh)
+        if board is not None:
+            rig_builder.set_kuchisync_passthrough(
+                board,
+                self.target_mesh,
+                self.kuchisync_passthrough,
+            )
+    finally:
+        _syncing_kuchisync = False
 
 
 class MorphRigPreferences(bpy.types.AddonPreferences):
@@ -132,6 +137,11 @@ class MorphRigSettings(bpy.types.PropertyGroup):
         description="Include unrecognized shape keys in an Extra row",
         default=False,
     )
+    separate_mouth_board: BoolProperty(
+        name="Separate mouth board",
+        description="Generate Lips and Vowels on a separate Mouth facial board armature",
+        default=True,
+    )
     board_scale: FloatProperty(
         name="Board Scale",
         description="Scale multiplier for the generated facial board",
@@ -149,7 +159,7 @@ class MorphRigSettings(bpy.types.PropertyGroup):
     )
     kuchisync_passthrough: BoolProperty(
         name="KuchiSync Passthrough",
-        description="Mute vowel shape key drivers so KuchiSync can write lip-sync keyframes directly",
+        description="Release vowel shape key drivers so KuchiSync can write lip-sync keyframes directly",
         default=False,
         update=_on_kuchisync_passthrough_updated,
     )
@@ -179,6 +189,13 @@ _CLASSES = (
 )
 
 
+def _deferred_refresh_panel_category():
+    from . import ui_panel
+
+    ui_panel.refresh_panel_category()
+    return None
+
+
 def register():
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
@@ -187,9 +204,13 @@ def register():
     from . import ui_panel
 
     ui_panel.register_ui()
+    if hasattr(bpy.app, "timers") and not bpy.app.timers.is_registered(_deferred_refresh_panel_category):
+        bpy.app.timers.register(_deferred_refresh_panel_category, first_interval=0.5)
 
 
 def unregister():
+    if hasattr(bpy.app, "timers") and bpy.app.timers.is_registered(_deferred_refresh_panel_category):
+        bpy.app.timers.unregister(_deferred_refresh_panel_category)
     from . import ui_panel
 
     ui_panel.unregister_ui()

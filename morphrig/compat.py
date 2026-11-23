@@ -51,11 +51,30 @@ def assign_bone_to_collection(
     return coll
 
 
+def _load_valid_icons() -> frozenset[str]:
+    try:
+        bl_rna = bpy.types.UILayout.bl_rna
+        # Blender stores the UI icon enum on UILayout.bl_rna.functions["label"].parameters["icon"], not properties.
+        for fn_name in ("label", "prop"):
+            fn = bl_rna.functions.get(fn_name)
+            if fn is not None:
+                icon_param = fn.parameters.get("icon")
+                if icon_param is not None and getattr(icon_param, "enum_items", None):
+                    return frozenset(item.identifier for item in icon_param.enum_items)
+        icon_prop = bl_rna.properties.get("icon")
+        if icon_prop is not None and getattr(icon_prop, "enum_items", None):
+            return frozenset(item.identifier for item in icon_prop.enum_items)
+    except Exception:
+        pass
+    return frozenset()
+
+
 def safe_icon(icon_name: str, fallback: str = "BLANK1") -> str:
     global _VALID_ICONS
     if _VALID_ICONS is None:
-        enum_items = bpy.types.UILayout.bl_rna.properties["icon"].enum_items
-        _VALID_ICONS = frozenset(item.identifier for item in enum_items)
+        _VALID_ICONS = _load_valid_icons()
+    if not _VALID_ICONS:
+        return "NONE"
     if icon_name in _VALID_ICONS:
         return icon_name
     if fallback in _VALID_ICONS:

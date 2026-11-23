@@ -22,8 +22,13 @@ LIMIT_CONSTRAINT_NAME = "MorphRig_Limit"
 
 # Blender ID and bone names hold at most 63 UTF-8 bytes.
 _MAX_NAME_BYTES = 63
-_CHAR_NAME_BYTES = _MAX_NAME_BYTES - len(widget_factory.WIDGET_COLLECTION_PREFIX)
+_CHAR_NAME_BYTES = _MAX_NAME_BYTES - len(widget_factory.WIDGET_COLLECTION_PREFIX) - len("_Mouth")
 MAX_COLS_PER_ROW = 9
+MOUTH_ROWS = ("Lips", "Vowels")
+FACE_ROWS = ("Eyebrows", "Eyes", "Emotes", "Extra")
+_KUCHISYNC_MOUTH_KEYS = frozenset(
+    semantic_mapper.normalize_shape_key_name(key) for key in ("ワ", "ワ1", "ワ2", "口")
+)
 
 
 @dataclass
@@ -229,25 +234,58 @@ def find_all_boards() -> list:
     ]
 
 
-def find_board_for_mesh(context, target_mesh=None) -> Optional[bpy.types.Object]:
-    """Return the board bound to target_mesh.
+def _board_sort_key(board) -> tuple:
+    role = board.get("morphrig_board_role", "")
+    if role in ("face", "combined"):
+        return (0, board.name)
+    if role == "mouth" or board.name.endswith("_Mouth"):
+        return (2, board.name)
+    return (1, board.name)
 
-    With no explicit mesh, the active board, the scene target mesh, the active mesh
-    and finally the first board in the current scene are tried in that order.
-    """
+
+def _companion_boards(board_armature) -> list:
+    if not _is_alive(board_armature) or board_armature.type != "ARMATURE":
+        return []
+    boards = [board_armature]
+    seen = {board_armature.name}
+    target_name = board_armature.get("morphrig_target_mesh", "")
+
+    companion_name = board_armature.get("morphrig_companion_board", "")
+    if companion_name and companion_name not in seen:
+        companion = bpy.data.objects.get(companion_name)
+        if (
+            _is_alive(companion)
+            and companion.type == "ARMATURE"
+            and (not target_name or companion.get("morphrig_target_mesh") == target_name)
+        ):
+            boards.append(companion)
+            seen.add(companion.name)
+
+    if target_name:
+        for board in find_all_boards():
+            if board.name not in seen and board.get("morphrig_target_mesh") == target_name:
+                boards.append(board)
+                seen.add(board.name)
+    return boards
+
+
+def find_boards_for_mesh(context, target_mesh=None) -> list:
+    """Return all boards bound to target_mesh, ordered primary first and mouth second."""
     boards = find_all_boards()
     if not boards:
-        return None
+        return []
 
     if target_mesh is not None:
-        for board in boards:
-            if board.get("morphrig_target_mesh") == target_mesh.name:
-                return board
-        return None
+        matched = [b for b in boards if b.get("morphrig_target_mesh") == target_mesh.name]
+        return sorted(matched, key=_board_sort_key)
 
     active = getattr(context, "active_object", None) if context is not None else None
     if active is not None and active in boards:
-        return active
+        mesh_name = active.get("morphrig_target_mesh", "")
+        if mesh_name:
+            matched = [b for b in boards if b.get("morphrig_target_mesh") == mesh_name]
+            return sorted(matched, key=_board_sort_key)
+        return [active]
 
     scene = getattr(context, "scene", None) if context is not None else None
     candidates = []
@@ -257,15 +295,34 @@ def find_board_for_mesh(context, target_mesh=None) -> Optional[bpy.types.Object]
     if active is not None and active.type == "MESH":
         candidates.append(active)
     for mesh in candidates:
-        for board in boards:
-            if board.get("morphrig_target_mesh") == mesh.name:
-                return board
+        matched = [b for b in boards if b.get("morphrig_target_mesh") == mesh.name]
+        if matched:
+            return sorted(matched, key=_board_sort_key)
 
     if scene is not None:
-        for board in boards:
-            if scene.objects.get(board.name) is not None:
-                return board
-    return boards[0]
+        scene_boards = [b for b in boards if scene.objects.get(b.name) is not None]
+        if scene_boards:
+            return sorted(scene_boards, key=_board_sort_key)
+    return sorted(boards, key=_board_sort_key)
+
+
+def find_board_for_mesh(context, target_mesh=None) -> Optional[bpy.types.Object]:
+    """Return the primary board bound to target_mesh, or the active board if selected."""
+    if target_mesh is None and context is not None:
+        active = getattr(context, "active_object", None)
+        if active is not None and active.type == "ARMATURE" and active.get("morphrig_target_mesh") is not None:
+            return active
+    boards = find_boards_for_mesh(context, target_mesh)
+    return boards[0] if boards else None
+
+
+def remove_boards_for_mesh(context, target_mesh=None) -> int:
+    """Remove all facial boards bound to target_mesh and return the count removed."""
+    removed = 0
+    for board in find_boards_for_mesh(context, target_mesh):
+        if remove_facial_board(context, board):
+            removed += 1
+    return removed
 
 
 def _coerce_slots(slots_override, target_mesh) -> list:
@@ -348,7 +405,17 @@ def _configure_fader_pose_bone(pose_bone, cap_widget, travel: float) -> None:
     limit.max_z = 0.0
 
 
-def _populate_board(context, board, target_mesh, layout, char_name, scale, widget_coll, widgets) -> None:
+def _populate_board(
+    context,
+    board,
+    target_mesh,
+    layout,
+    board_token: str,
+    scale: float,
+    widget_coll,
+    widgets,
+    char_name: Optional[str] = None,
+) -> None:
     arm_data = board.data
     frame_wgt, track_wgt, cap_wgt = widgets
     travel = layout.track_height
@@ -437,7 +504,7 @@ def _populate_board(context, board, target_mesh, layout, char_name, scale, widge
 
     labels_obj = widget_factory.build_merged_board_labels_object(
         context,
-        char_name,
+        board_token,
         layout.labels,
         board,
         board_root_bone_name=BOARD_ROOT_NAME,
@@ -445,12 +512,21 @@ def _populate_board(context, board, target_mesh, layout, char_name, scale, widge
         target_collection=context.scene.collection,
     )
 
-    vowel_keys = [placement.shape_key_name for placement in layout.faders if placement.row == "Vowels"]
+    vowel_keys = []
+    seen_vowels = set()
+    for placement in layout.faders:
+        sk_name = placement.shape_key_name
+        norm_name = semantic_mapper.normalize_shape_key_name(sk_name)
+        if placement.row == "Vowels" or norm_name in _KUCHISYNC_MOUTH_KEYS:
+            if sk_name not in seen_vowels:
+                seen_vowels.add(sk_name)
+                vowel_keys.append(sk_name)
+
     board["morphrig_target_mesh"] = target_mesh.name
     board["morphrig_vowel_keys"] = json.dumps(vowel_keys, ensure_ascii=False)
     board["morphrig_fader_map"] = json.dumps(fader_map, ensure_ascii=False)
     board["morphrig_track_height"] = float(travel)
-    board["morphrig_char_name"] = char_name
+    board["morphrig_char_name"] = char_name if char_name is not None else board_token
     board["morphrig_widget_collection"] = widget_coll.name
     board["morphrig_labels_object"] = labels_obj.name
     board["morphrig_board_scale"] = scale
@@ -464,6 +540,56 @@ def _discard_partial_board(context, board, widgets) -> None:
             _remove_object_with_mesh(obj)
 
 
+def _create_single_board(
+    context,
+    target_mesh,
+    layout: BoardLayout,
+    board_token: str,
+    char_name: str,
+    role: str,
+    location: Vector,
+    scale: float,
+    widget_coll,
+) -> bpy.types.Object:
+    frame_wgt = widget_factory.create_board_frame_widget(
+        f"WGT_Board_Frame_{board_token}", 0.0, 0.0, layout.width, layout.height, widget_coll
+    )
+    track_wgt = widget_factory.create_slider_track_widget(
+        f"WGT_Slider_Track_{board_token}", layout.track_height, scale, widget_coll
+    )
+    cap_wgt = widget_factory.create_slider_cap_widget(f"WGT_Slider_Cap_{board_token}", scale, widget_coll)
+
+    board_name = f"{BOARD_PREFIX}{board_token}"
+    arm_data = bpy.data.armatures.new(board_name)
+    arm_data.display_type = "STICK"
+    board = bpy.data.objects.new(board_name, arm_data)
+    board.location = location
+    board.show_in_front = True
+    context.scene.collection.objects.link(board)
+
+    board["morphrig_target_mesh"] = target_mesh.name
+    board["morphrig_char_name"] = char_name
+    board["morphrig_board_role"] = role
+    board["morphrig_widget_collection"] = widget_coll.name
+    widgets = (frame_wgt, track_wgt, cap_wgt)
+    try:
+        _populate_board(
+            context,
+            board,
+            target_mesh,
+            layout,
+            board_token,
+            scale,
+            widget_coll,
+            widgets,
+            char_name=char_name,
+        )
+    except Exception:
+        _discard_partial_board(context, board, widgets)
+        raise
+    return board
+
+
 def build_facial_board(
     context,
     target_mesh,
@@ -473,6 +599,7 @@ def build_facial_board(
     include_unmapped: bool = False,
     board_scale: float = 1.0,
     track_height: float = 0.12,
+    separate_mouth_board: bool = True,
 ) -> bpy.types.Object:
     if target_mesh is None or target_mesh.type != "MESH":
         raise ValueError("Target must be a mesh object.")
@@ -497,125 +624,195 @@ def build_facial_board(
         raise ValueError(f"No mappable shape keys found on '{target_mesh.name}'.")
 
     scale = float(board_scale)
-    layout = calculate_board_layout(grouped, scale=scale, track_height=float(track_height))
+    height_val = float(track_height)
     char_name = _truncate_bytes(_sanitize_token(target_mesh.name), _CHAR_NAME_BYTES)
-
     bounds_min, bounds_max = _world_bounds(context, target_mesh)
-    board_location = Vector((
-        bounds_max.x + 0.18,
-        (bounds_min.y + bounds_max.y) / 2.0,
-        bounds_max.z - layout.height,
-    ))
-
+    mid_y = (bounds_min.y + bounds_max.y) / 2.0
     widget_coll = widget_factory.ensure_widget_collection(context, char_name)
-    frame_wgt = widget_factory.create_board_frame_widget(
-        f"WGT_Board_Frame_{char_name}", 0.0, 0.0, layout.width, layout.height, widget_coll
-    )
-    track_wgt = widget_factory.create_slider_track_widget(
-        f"WGT_Slider_Track_{char_name}", layout.track_height, scale, widget_coll
-    )
-    cap_wgt = widget_factory.create_slider_cap_widget(f"WGT_Slider_Cap_{char_name}", scale, widget_coll)
 
-    board_name = f"{BOARD_PREFIX}{char_name}"
-    arm_data = bpy.data.armatures.new(board_name)
-    arm_data.display_type = "STICK"
-    board = bpy.data.objects.new(board_name, arm_data)
-    board.location = board_location
-    board.show_in_front = True
-    context.scene.collection.objects.link(board)
+    face_grouped = {row: groups for row, groups in grouped.items() if row not in MOUTH_ROWS and groups}
+    mouth_grouped = {row: groups for row, groups in grouped.items() if row in MOUTH_ROWS and groups}
 
-    board["morphrig_target_mesh"] = target_mesh.name
-    board["morphrig_char_name"] = char_name
-    board["morphrig_widget_collection"] = widget_coll.name
-    widgets = (frame_wgt, track_wgt, cap_wgt)
-    try:
-        _populate_board(context, board, target_mesh, layout, char_name, scale, widget_coll, widgets)
-    except Exception:
-        _discard_partial_board(context, board, widgets)
-        raise
+    if separate_mouth_board and face_grouped and mouth_grouped:
+        face_layout = calculate_board_layout(face_grouped, scale=scale, track_height=height_val)
+        mouth_layout = calculate_board_layout(mouth_grouped, scale=scale, track_height=height_val)
+        face_location = Vector((bounds_max.x + 0.18, mid_y, bounds_max.z - face_layout.height))
+        mouth_location = Vector((
+            bounds_max.x + 0.18 + face_layout.width + 0.08 * scale,
+            mid_y,
+            bounds_max.z - mouth_layout.height,
+        ))
+
+        face_board = _create_single_board(
+            context, target_mesh, face_layout, char_name, char_name, "face", face_location, scale, widget_coll
+        )
+        try:
+            mouth_board = _create_single_board(
+                context,
+                target_mesh,
+                mouth_layout,
+                f"{char_name}_Mouth",
+                char_name,
+                "mouth",
+                mouth_location,
+                scale,
+                widget_coll,
+            )
+        except Exception:
+            remove_facial_board(context, face_board)
+            raise
+
+        face_board["morphrig_companion_board"] = mouth_board.name
+        mouth_board["morphrig_companion_board"] = face_board.name
+        created_boards = [face_board, mouth_board]
+    else:
+        layout = calculate_board_layout(grouped, scale=scale, track_height=height_val)
+        role = "combined" if (face_grouped and mouth_grouped) else ("face" if face_grouped else "mouth")
+        board_location = Vector((bounds_max.x + 0.18, mid_y, bounds_max.z - layout.height))
+        board = _create_single_board(
+            context, target_mesh, layout, char_name, char_name, role, board_location, scale, widget_coll
+        )
+        created_boards = [board]
 
     if follow_head_bone:
         info = mmr_bridge.detect_mmr_rig_info(target_mesh)
         mmr_arm = info.armature
         head_bone_name = info.head_bone_name
-        if (
-            mmr_arm is not None
-            and mmr_arm is not board
-            and head_bone_name
-            and mmr_arm.pose.bones.get(head_bone_name) is not None
-        ):
-            _parent_to_bone_keep_world(context, board, mmr_arm, head_bone_name)
+        if mmr_arm is not None and head_bone_name and mmr_arm.pose.bones.get(head_bone_name) is not None:
+            for board in created_boards:
+                if mmr_arm is not board:
+                    _parent_to_bone_keep_world(context, board, mmr_arm, head_bone_name)
 
     context.view_layer.update()
-    return board
+    return created_boards[0]
+
+
+def _release_board_vowel_drivers(board, target_mesh, vowel_keys: set, fader_map: dict) -> int:
+    shape_keys = getattr(getattr(target_mesh, "data", None), "shape_keys", None)
+    key_blocks = shape_keys.key_blocks if shape_keys is not None else None
+    release_keys = set(vowel_keys)
+    updated = 0
+
+    for fader_name, info in fader_map.items():
+        sk_name = info.get("shape_key", "")
+        if info.get("row") != "Vowels" and sk_name not in vowel_keys:
+            continue
+        removed = False
+        if sk_name:
+            release_keys.add(sk_name)
+            removed = compat.remove_shape_key_driver(target_mesh, sk_name)
+        pose_bone = board.pose.bones.get(fader_name)
+        if pose_bone is not None:
+            compat.set_pose_bone_color(pose_bone, compat.ROW_COLOR_PALETTES["MUTED"])
+        if pose_bone is not None or removed:
+            updated += 1
+
+    for sk_name in release_keys:
+        if sk_name:
+            compat.remove_shape_key_driver(target_mesh, sk_name)
+
+    if shape_keys is not None and shape_keys.animation_data is not None and release_keys:
+        anim = shape_keys.animation_data
+        paths = set()
+        for sk_name in release_keys:
+            if not sk_name:
+                continue
+            if key_blocks is not None and key_blocks.get(sk_name) is not None:
+                paths.add(key_blocks[sk_name].path_from_id("value"))
+            paths.add(f'key_blocks["{sk_name}"].value')
+            paths.add(f"key_blocks['{sk_name}'].value")
+        residual = [fc for fc in anim.drivers if fc.data_path in paths]
+        for fcurve in residual:
+            anim.drivers.remove(fcurve)
+        if not anim.drivers and anim.action is None and not anim.nla_tracks:
+            shape_keys.animation_data_clear()
+
+    return updated
+
+
+def _rebind_board_vowel_drivers(board, target_mesh, vowel_keys: set, fader_map: dict) -> int:
+    shape_keys = getattr(getattr(target_mesh, "data", None), "shape_keys", None)
+    key_blocks = shape_keys.key_blocks if shape_keys is not None else None
+    track_height = float(board.get("morphrig_track_height", 0.12))
+    updated = 0
+
+    for fader_name, info in fader_map.items():
+        sk_name = info.get("shape_key", "")
+        if info.get("row") != "Vowels" and sk_name not in vowel_keys:
+            continue
+        pose_bone = board.pose.bones.get(fader_name)
+        if pose_bone is None:
+            continue
+        if sk_name and key_blocks is not None and key_blocks.get(sk_name) is not None:
+            compat.bind_fader_driver(target_mesh, sk_name, board, fader_name, track_height)
+        compat.set_pose_bone_color(
+            pose_bone, _palette_for(info.get("row", "Vowels"), info.get("side", ""))
+        )
+        updated += 1
+
+    return updated
 
 
 def set_kuchisync_passthrough(board_armature, target_mesh=None, enabled: bool = True) -> int:
-    """Mute or unmute the vowel shape key drivers and return how many were changed."""
-    if not _is_alive(board_armature):
+    """Detach or re-bind vowel shape key drivers across companion boards."""
+    boards = _companion_boards(board_armature)
+    if not boards:
         return 0
-    target_mesh = _resolve_target_mesh(board_armature, target_mesh)
-    vowel_keys = set(_load_json(board_armature, "morphrig_vowel_keys", []))
-    muted = bool(enabled)
 
-    changed = 0
-    shape_keys = getattr(getattr(target_mesh, "data", None), "shape_keys", None)
-    if shape_keys is not None and shape_keys.animation_data is not None:
-        key_blocks = shape_keys.key_blocks
-        paths = {
-            key_blocks[name].path_from_id("value")
-            for name in vowel_keys
-            if key_blocks.get(name) is not None
-        }
-        for fcurve in shape_keys.animation_data.drivers:
-            if fcurve.data_path in paths:
-                fcurve.mute = muted
-                changed += 1
-
-    fader_map = _load_json(board_armature, "morphrig_fader_map", {})
-    for fader_name, info in fader_map.items():
-        if info.get("row") != "Vowels" and info.get("shape_key") not in vowel_keys:
-            continue
-        pose_bone = board_armature.pose.bones.get(fader_name)
-        if pose_bone is None:
-            continue
-        if muted:
-            palette = compat.ROW_COLOR_PALETTES["MUTED"]
+    release = bool(enabled)
+    updated = 0
+    for board in boards:
+        board_mesh = _resolve_target_mesh(board, target_mesh)
+        vowel_keys = set(_load_json(board, "morphrig_vowel_keys", []))
+        fader_map = _load_json(board, "morphrig_fader_map", {})
+        if release:
+            updated += _release_board_vowel_drivers(board, board_mesh, vowel_keys, fader_map)
         else:
-            palette = _palette_for(info.get("row", "Vowels"), info.get("side", ""))
-        compat.set_pose_bone_color(pose_bone, palette)
+            updated += _rebind_board_vowel_drivers(board, board_mesh, vowel_keys, fader_map)
+        board["morphrig_kuchisync_passthrough"] = release
 
-    board_armature["morphrig_kuchisync_passthrough"] = muted
-    return changed
+    ctx = getattr(bpy, "context", None)
+    view_layer = getattr(ctx, "view_layer", None) if ctx is not None else None
+    if view_layer is not None:
+        view_layer.update()
+    return updated
 
 
 def reset_all_sliders(board_armature) -> int:
-    if not _is_alive(board_armature):
+    boards = _companion_boards(board_armature)
+    if not boards:
         return 0
     count = 0
-    for name in _fader_names(board_armature):
-        board_armature.pose.bones[name].location = (0.0, 0.0, 0.0)
-        count += 1
-    return count
-
-
-def key_all_sliders(context, board_armature, frame=None) -> int:
-    if not _is_alive(board_armature):
-        return 0
-    if frame is None:
-        frame = context.scene.frame_current
-    count = 0
-    for name in _fader_names(board_armature):
-        pose_bone = board_armature.pose.bones[name]
-        if pose_bone.keyframe_insert(data_path="location", index=1, frame=float(frame), group=name):
+    for board in boards:
+        for name in _fader_names(board):
+            board.pose.bones[name].location = (0.0, 0.0, 0.0)
             count += 1
     return count
 
 
-def clear_board_keyframes(board_armature) -> int:
-    if not _is_alive(board_armature):
+def key_all_sliders(context, board_armature, frame=None) -> int:
+    boards = _companion_boards(board_armature)
+    if not boards:
         return 0
-    return compat.clear_fader_keyframes(board_armature, _fader_names(board_armature))
+    if frame is None:
+        frame = context.scene.frame_current
+    count = 0
+    for board in boards:
+        for name in _fader_names(board):
+            pose_bone = board.pose.bones[name]
+            if pose_bone.keyframe_insert(data_path="location", index=1, frame=float(frame), group=name):
+                count += 1
+    return count
+
+
+def clear_board_keyframes(board_armature) -> int:
+    boards = _companion_boards(board_armature)
+    if not boards:
+        return 0
+    removed = 0
+    for board in boards:
+        removed += compat.clear_fader_keyframes(board, _fader_names(board))
+    return removed
 
 
 def _driver_targets_board(fcurve, board_armature) -> bool:
@@ -654,11 +851,19 @@ def remove_facial_board(context, board_armature) -> bool:
         return False
     _ensure_object_mode(context)
 
+    board_name = board_armature.name
     target_mesh = _resolve_target_mesh(board_armature)
+    removed_any = False
     if target_mesh is not None and getattr(target_mesh.data, "shape_keys", None) is not None:
         for info in _load_json(board_armature, "morphrig_fader_map", {}).values():
-            compat.remove_shape_key_driver(target_mesh, info.get("shape_key", ""))
-    _remove_board_drivers(board_armature)
+            if compat.remove_shape_key_driver(target_mesh, info.get("shape_key", "")):
+                removed_any = True
+    if _remove_board_drivers(board_armature) > 0:
+        removed_any = True
+    if removed_any and target_mesh is not None and getattr(target_mesh.data, "shape_keys", None) is not None:
+        anim = target_mesh.data.shape_keys.animation_data
+        if anim is not None and not anim.drivers and anim.action is None and not anim.nla_tracks:
+            target_mesh.data.shape_keys.animation_data_clear()
 
     labels_name = board_armature.get("morphrig_labels_object", "")
     labels = [
@@ -681,12 +886,24 @@ def remove_facial_board(context, board_armature) -> bool:
     if action is not None and action.users == 0:
         bpy.data.actions.remove(action)
 
+    remaining_boards = find_all_boards()
+    for other in remaining_boards:
+        if other.get("morphrig_companion_board") == board_name:
+            del other["morphrig_companion_board"]
+
+    other_widgets = {
+        pb.custom_shape
+        for other in remaining_boards
+        for pb in other.pose.bones
+        if pb.custom_shape is not None
+    }
     for obj in widgets:
-        if _is_alive(obj):
+        if _is_alive(obj) and obj not in other_widgets:
             _remove_object_with_mesh(obj)
+
     if widget_coll is not None:
         shared = any(
-            board.get("morphrig_widget_collection") == widget_coll.name for board in find_all_boards()
+            board.get("morphrig_widget_collection") == widget_coll.name for board in remaining_boards
         )
         if not shared:
             for obj in list(widget_coll.objects):
