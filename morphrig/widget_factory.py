@@ -97,7 +97,7 @@ def create_slider_track_widget(
     scale: float,
     collection,
 ) -> bpy.types.Object:
-    hx = 0.0085 * scale
+    hx = 0.0048 * scale
     verts = [
         (-hx, 0.0, 0.0),
         (hx, 0.0, 0.0),
@@ -109,7 +109,7 @@ def create_slider_track_widget(
 
 
 def create_slider_cap_widget(name: str, scale: float, collection) -> bpy.types.Object:
-    return _create_box_object(name, 0.010 * scale, 0.005 * scale, 0.005 * scale, collection)
+    return _create_box_object(name, 0.0058 * scale, 0.0028 * scale, 0.0028 * scale, collection)
 
 
 def create_mouth_frame_widget(
@@ -134,9 +134,9 @@ def create_mouth_frame_widget(
 def create_mouth_bar_cap_widget(name: str, scale: float, collection) -> bpy.types.Object:
     return _create_box_object(
         name,
-        0.030 * scale * 0.5,
-        0.014 * scale * 0.5,
-        0.008 * scale * 0.5,
+        0.018 * scale * 0.5,
+        0.0085 * scale * 0.5,
+        0.005 * scale * 0.5,
         collection,
     )
 
@@ -145,7 +145,7 @@ def create_mouth_joystick_widget(name: str, scale: float, collection) -> bpy.typ
     segments = 24
     verts = []
     edges = []
-    for ring_idx, radius in enumerate((0.022 * scale, 0.012 * scale)):
+    for ring_idx, radius in enumerate((0.013 * scale, 0.007 * scale)):
         base = ring_idx * segments
         for index in range(segments):
             angle = (2.0 * math.pi * index) / segments

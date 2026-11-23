@@ -23,8 +23,6 @@ LIMIT_CONSTRAINT_NAME = "MorphRig_Limit"
 # Blender ID and bone names hold at most 63 UTF-8 bytes.
 _MAX_NAME_BYTES = 63
 _CHAR_NAME_BYTES = _MAX_NAME_BYTES - len(widget_factory.WIDGET_COLLECTION_PREFIX) - len("_Mouth")
-MAX_COLS_PER_ROW = 9
-MAX_ROWS_PER_COL = 14
 MOUTH_ROWS = ("Lips", "Vowels")
 FACE_ROWS = ("Eyebrows", "Eyes", "Emotes", "Extra")
 _PRIMARY_VOWELS = ("A", "I", "U", "E", "O")
@@ -97,44 +95,28 @@ def calculate_board_layout(
     track_height: float = 0.12,
     base_font: Optional[float] = None,
 ) -> BoardLayout:
-    """Lay out rows into multi-column horizontal sliders (origin at bottom-left)."""
-    max_rows_per_col = MAX_ROWS_PER_COL
-    slot_size = base_font if base_font is not None else 0.020 * scale
-    header_size = 1.25 * slot_size if base_font is not None else 0.025 * scale
-    row_pitch = 0.032 * scale
-    label_col_width = 0.175 * scale
-    col_gap = 0.048 * scale
-    margin = 0.035 * scale
-    effective_track_height = track_height * scale
-    col_width = label_col_width + effective_track_height
+    """Lay out categories top to bottom in one compact vertical column."""
+    slot_size = base_font if base_font is not None else 0.0105 * scale
+    header_size = 1.28 * slot_size if base_font is not None else 0.0135 * scale
+    row_pitch = 0.016 * scale
+    category_gap = 0.012 * scale
+    label_col_width = 0.090 * scale
+    effective_track_height = track_height * 0.55 * scale
+    margin = 0.018 * scale
 
-    columns = []
-    cur_col = []
+    blocks = []
     for row in _ordered_rows(grouped):
         items = _flatten_category_items(grouped[row])
         if not items:
             continue
-        header_text = _ROW_HEADERS.get(row, row.upper())
-        if cur_col and len(cur_col) + 1 + len(items) > max_rows_per_col:
-            columns.append(cur_col)
-            cur_col = []
-        cur_col.append(("header", header_text))
-        for label_text, side, shape_key_name in items:
-            if len(cur_col) >= max_rows_per_col:
-                columns.append(cur_col)
-                cur_col = []
-            cur_col.append(("item", row, label_text, side, shape_key_name))
-    if cur_col:
-        columns.append(cur_col)
+        blocks.append((row, _ROW_HEADERS.get(row, row.upper()), items))
 
-    max_col_rows = max((len(col) for col in columns), default=0)
-    height = 2.0 * margin + (max_col_rows * row_pitch if max_col_rows else 0.0)
-    num_cols = len(columns)
-    width = (
-        2.0 * margin + num_cols * col_width + max(0, num_cols - 1) * col_gap
-        if num_cols
-        else 0.3 * scale
-    )
+    num_categories = len(blocks)
+    num_rows = sum(1 + len(items) for _, _, items in blocks)
+    height = 2.0 * margin + num_rows * row_pitch + max(0, num_categories - 1) * category_gap
+    width = 2.0 * margin + label_col_width + effective_track_height
+    label_x = margin
+    slider_x = margin + label_col_width
 
     layout = BoardLayout(
         width=width,
@@ -142,18 +124,19 @@ def calculate_board_layout(
         track_height=effective_track_height,
         scale=scale,
     )
-    for col_idx, col in enumerate(columns):
-        col_x = margin + col_idx * (col_width + col_gap)
-        for row_idx, entry in enumerate(col):
-            row_center_z = height - margin - (row_idx + 0.5) * row_pitch
-            if entry[0] == "header":
-                layout.labels.append(
-                    TextLabelSpec(entry[1], col_x, row_center_z - 0.35 * header_size, header_size, "LEFT")
-                )
-                continue
-            _, row_name, label_text, side, shape_key_name = entry
+    y_top = height - margin
+    for cat_idx, (row_name, header_text, items) in enumerate(blocks):
+        if cat_idx > 0:
+            y_top -= category_gap
+        header_center_z = y_top - 0.5 * row_pitch
+        layout.labels.append(
+            TextLabelSpec(header_text, label_x, header_center_z - 0.35 * header_size, header_size, "LEFT")
+        )
+        y_top -= row_pitch
+        for label_text, side, shape_key_name in items:
+            row_center_z = y_top - 0.5 * row_pitch
             layout.labels.append(
-                TextLabelSpec(label_text, col_x, row_center_z - 0.35 * slot_size, slot_size, "LEFT")
+                TextLabelSpec(label_text, label_x, row_center_z - 0.35 * slot_size, slot_size, "LEFT")
             )
             layout.faders.append(
                 FaderPlacement(
@@ -161,11 +144,12 @@ def calculate_board_layout(
                     label=label_text,
                     side=side,
                     shape_key_name=shape_key_name,
-                    x=col_x + label_col_width,
+                    x=slider_x,
                     z=row_center_z,
                     is_horizontal=True,
                 )
             )
+            y_top -= row_pitch
 
     return layout
 
@@ -484,8 +468,8 @@ def _populate_board(
     arm_data = board.data
     frame_wgt, track_wgt, cap_wgt = widgets
     travel = layout.track_height
-    root_length = 0.1 * scale
-    fader_length = 0.02 * scale
+    root_length = 0.05 * scale
+    fader_length = 0.012 * scale
 
     _select_board_only(context, board)
     used_names = {BOARD_ROOT_NAME}
@@ -687,8 +671,8 @@ def _populate_mouth_joystick_board(
     frame_wgt, bar_wgt, joy_wgt = widgets
     half = box_size * 0.5
     bar_y = box_size + bar_gap
-    root_length = 0.08 * scale
-    bone_length = 0.03 * scale
+    root_length = 0.05 * scale
+    bone_length = 0.018 * scale
     has_a = "A" in primary_vowels
     has_uieo = any(key in primary_vowels for key in ("I", "U", "E", "O"))
 
@@ -804,18 +788,18 @@ def _populate_mouth_joystick_board(
                 "palette": "THEME03",
             }
 
-    font_size = 0.030 * scale
+    font_size = 0.018 * scale
     label_specs = []
     if has_a:
-        label_specs.append(TextLabelSpec("a", -0.024 * scale, bar_y - 0.008 * scale, font_size, "RIGHT"))
+        label_specs.append(TextLabelSpec("a", -0.014 * scale, bar_y - 0.005 * scale, font_size, "RIGHT"))
     if "O" in primary_vowels:
-        label_specs.append(TextLabelSpec("o", half, box_size - 0.030 * scale, font_size, "CENTER"))
+        label_specs.append(TextLabelSpec("o", half, box_size - 0.019 * scale, font_size, "CENTER"))
     if "E" in primary_vowels:
-        label_specs.append(TextLabelSpec("e", half, 0.012 * scale, font_size, "CENTER"))
+        label_specs.append(TextLabelSpec("e", half, 0.007 * scale, font_size, "CENTER"))
     if "U" in primary_vowels:
-        label_specs.append(TextLabelSpec("u", 0.022 * scale, half - 0.010 * scale, font_size, "CENTER"))
+        label_specs.append(TextLabelSpec("u", 0.014 * scale, half - 0.006 * scale, font_size, "CENTER"))
     if "I" in primary_vowels:
-        label_specs.append(TextLabelSpec("i", box_size - 0.022 * scale, half - 0.010 * scale, font_size, "CENTER"))
+        label_specs.append(TextLabelSpec("i", box_size - 0.014 * scale, half - 0.006 * scale, font_size, "CENTER"))
 
     labels_obj = widget_factory.build_merged_board_labels_object(
         context,
@@ -855,11 +839,11 @@ def _create_mouth_joystick_board(
     widget_coll,
 ) -> bpy.types.Object:
     mouth_token = f"{char_name}_Mouth"
-    box_size = 0.22 * scale
-    bar_gap = 0.032 * scale
+    box_size = 0.13 * scale
+    bar_gap = 0.020 * scale
     bar_y = box_size + bar_gap
-    total_height = bar_y + 0.02 * scale
-    location = Vector((bounds_max.x + 0.14, mid_y, bounds_max.z - total_height))
+    total_height = bar_y + 0.014 * scale
+    location = Vector((bounds_max.x + 0.09, mid_y, bounds_max.z - total_height))
 
     frame_wgt = widget_factory.create_mouth_frame_widget(
         f"WGT_Mouth_Frame_{mouth_token}", box_size, bar_gap, widget_coll
@@ -949,7 +933,7 @@ def build_facial_board(
     if separate_mouth_board and primary_vowels:
         if face_grouped:
             face_layout = calculate_board_layout(face_grouped, scale=scale, track_height=height_val)
-            face_location = Vector((bounds_min.x - 0.18 - face_layout.width, mid_y, bounds_max.z - face_layout.height))
+            face_location = Vector((bounds_min.x - 0.10 - face_layout.width, mid_y, bounds_max.z - face_layout.height))
             face_board = _create_single_board(
                 context, target_mesh, face_layout, char_name, char_name, "face", face_location, scale, widget_coll
             )
@@ -973,7 +957,7 @@ def build_facial_board(
         has_face = any(row not in MOUTH_ROWS and groups for row, groups in grouped.items())
         has_mouth = any(row in MOUTH_ROWS and groups for row, groups in grouped.items())
         role = "combined" if (has_face and has_mouth) else ("face" if has_face else "mouth")
-        board_location = Vector((bounds_max.x + 0.18, mid_y, bounds_max.z - layout.height))
+        board_location = Vector((bounds_max.x + 0.10, mid_y, bounds_max.z - layout.height))
         board = _create_single_board(
             context, target_mesh, layout, char_name, char_name, role, board_location, scale, widget_coll
         )

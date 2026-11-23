@@ -300,7 +300,7 @@ def _build_board_fixture():
 
 
 def test_procedural_board_and_text_mesh_generation():
-    from morphrig import compat, rig_builder, widget_factory
+    from morphrig import compat, rig_builder, semantic_mapper, widget_factory
 
     mesh_obj, mmr_arm = _build_board_fixture()
     boards = rig_builder.find_boards_for_mesh(bpy.context, mesh_obj)
@@ -371,6 +371,31 @@ def test_procedural_board_and_text_mesh_generation():
 
     face_faders = [pb for pb in face_board.pose.bones if pb.name.startswith("Fader_")]
     assert len(face_faders) > 0
+    fader_data_bones = [face_board.data.bones[pb.name] for pb in face_faders]
+    fader_xs = [b.head_local.x for b in fader_data_bones]
+    fader_zs = [b.head_local.z for b in fader_data_bones]
+    assert all(abs(x - fader_xs[0]) < 1e-6 for x in fader_xs), f"Faders not aligned in one column: {fader_xs}"
+    assert all(fader_zs[i] > fader_zs[i + 1] for i in range(len(fader_zs) - 1)), (
+        f"Faders should descend top-to-bottom: {fader_zs}"
+    )
+
+    face_slots = [
+        s for s in semantic_mapper.scan_mesh_shape_keys(mesh_obj, include_emotes=True, include_unmapped=False)
+        if s.shape_key_name not in {"あ２", "い１", "う", "え", "お"}
+    ]
+    face_grouped = semantic_mapper.group_control_slots(face_slots, include_emotes=True, include_unmapped=False)
+    face_layout = rig_builder.calculate_board_layout(face_grouped, scale=1.0, track_height=0.12)
+    assert face_layout.width < 0.25, f"Expected compact Face Board width < 0.25, got {face_layout.width}"
+    assert face_layout.height > face_layout.width, (
+        f"Expected portrait Face Board height > width, got {face_layout.height} vs {face_layout.width}"
+    )
+    frame_wgt = face_board.pose.bones["Board_Root"].custom_shape
+    frame_xs = [v.co.x for v in frame_wgt.data.vertices]
+    frame_ys = [v.co.y for v in frame_wgt.data.vertices]
+    frame_w = max(frame_xs) - min(frame_xs)
+    frame_h = max(frame_ys) - min(frame_ys)
+    assert frame_w < 0.25 and frame_h > frame_w, f"Unexpected frame bounds: {frame_w} x {frame_h}"
+
     face_travel = float(face_board["morphrig_track_height"])
     for pb in face_faders:
         assert tuple(pb.lock_location) == (True, False, True)
@@ -387,6 +412,7 @@ def test_procedural_board_and_text_mesh_generation():
         assert con.use_min_z is True and con.use_max_z is True
 
     box_size = float(mouth_board["morphrig_track_height"])
+    assert box_size <= 0.15, f"Expected compact Mouth Rig box_size <= 0.15, got {box_size}"
     half = box_size * 0.5
     pb_a = mouth_board.pose.bones["Fader_Vowel_A"]
     assert pb_a.custom_shape is not None and pb_a.custom_shape.name.startswith("WGT_Mouth_Bar_")
