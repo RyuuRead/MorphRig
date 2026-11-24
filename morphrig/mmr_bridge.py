@@ -202,7 +202,7 @@ def _read_prop(prop_obj, attr: str, default=None):
     return default
 
 
-def _has_generated_rigify_markers(arm_obj: bpy.types.Object) -> bool:
+def _has_rig_collection_or_id(arm_obj: bpy.types.Object) -> bool:
     arm_data = getattr(arm_obj, "data", None)
     if arm_data is None:
         return False
@@ -213,8 +213,36 @@ def _has_generated_rigify_markers(arm_obj: bpy.types.Object) -> bool:
         for coll_name in _MMR_RIG_COLLECTION_NAMES:
             if bone_colls.get(coll_name) is not None:
                 return True
+    return False
+
+
+def _has_generated_rigify_markers(arm_obj: bpy.types.Object) -> bool:
+    if _has_rig_collection_or_id(arm_obj):
+        return True
+    arm_data = getattr(arm_obj, "data", None)
     bones = getattr(arm_data, "bones", None)
     if bones is not None and "c_head.x" in bones:
+        return True
+    return False
+
+
+def _has_bool_mmr_marker(arm_obj: bpy.types.Object) -> bool:
+    if not hasattr(arm_obj, "get"):
+        return False
+    # Real MikuMikuRig stores an IDPropertyGroup under "mmr" on raw MMD armatures; only boolean/int flags count as markers.
+    raw = arm_obj.get("mmr")
+    return isinstance(raw, (bool, int)) and bool(raw)
+
+
+def _is_temporary_mmr_metarig(arm_obj: bpy.types.Object) -> bool:
+    if arm_obj.name.startswith("MMR-"):
+        return True
+    mmr_prop = _get_mmr_prop(arm_obj)
+    if (
+        bool(_read_prop(mmr_prop, "Generate_controllers", False))
+        and not arm_obj.name.startswith("RIG-")
+        and not _has_rig_collection_or_id(arm_obj)
+    ):
         return True
     return False
 
@@ -222,35 +250,21 @@ def _has_generated_rigify_markers(arm_obj: bpy.types.Object) -> bool:
 def _check_is_mmr_rig(arm_obj: Optional[bpy.types.Object]) -> bool:
     if arm_obj is None or getattr(arm_obj, "type", "") != "ARMATURE":
         return False
-    if arm_obj.name.startswith("MMR-"):
+    if _is_temporary_mmr_metarig(arm_obj):
         return False
-    mmr_prop = _get_mmr_prop(arm_obj)
-    if bool(_read_prop(mmr_prop, "MMR_Arm", False)):
-        return True
     if _has_generated_rigify_markers(arm_obj):
         return True
     if arm_obj.name.startswith("RIG-") and _resolve_head_bone_name(arm_obj) != "":
         return True
-    if bool(_read_prop(mmr_prop, "Generate_controllers", False)):
-        return False
-    if hasattr(arm_obj, "keys") and "mmr" in arm_obj.keys():
+    mmr_prop = _get_mmr_prop(arm_obj)
+    if bool(_read_prop(mmr_prop, "MMR_Arm", False)):
+        return True
+    if _has_bool_mmr_marker(arm_obj):
         return True
     return False
 
 
 def is_final_mmr_controller_rig(arm_obj: Optional[bpy.types.Object]) -> bool:
-    if arm_obj is None or getattr(arm_obj, "type", "") != "ARMATURE":
-        return False
-    if arm_obj.name.startswith("MMR-"):
-        return False
-    mmr_prop = _get_mmr_prop(arm_obj)
-    if (
-        bool(_read_prop(mmr_prop, "Generate_controllers", False))
-        and not bool(_read_prop(mmr_prop, "MMR_Arm", False))
-        and not arm_obj.name.startswith("RIG-")
-        and not _has_generated_rigify_markers(arm_obj)
-    ):
-        return False
     return _check_is_mmr_rig(arm_obj)
 
 
@@ -463,8 +477,10 @@ def detect_mmr_rig_info(mesh_obj: Optional[bpy.types.Object]) -> MMRContextInfo:
             has_legacy_emoji_rig=has_emoji,
         )
 
-    is_mmr_rig = is_final_mmr_controller_rig(arm_obj)
-    if not is_mmr_rig:
+    prefer_companion = not (
+        arm_obj.name.startswith("RIG-") or _has_generated_rigify_markers(arm_obj)
+    )
+    if prefer_companion:
         companion = _find_companion_mmr_rig(arm_obj, scene)
         if companion is not None:
             head_bone_name = _resolve_head_bone_name(companion) or _resolve_head_bone_name(arm_obj)
@@ -480,6 +496,8 @@ def detect_mmr_rig_info(mesh_obj: Optional[bpy.types.Object]) -> MMRContextInfo:
                 is_mmr_rig=True,
                 has_legacy_emoji_rig=has_emoji,
             )
+
+    is_mmr_rig = is_final_mmr_controller_rig(arm_obj)
 
     head_bone_name = _resolve_head_bone_name(arm_obj)
     has_emoji = (

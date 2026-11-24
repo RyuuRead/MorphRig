@@ -216,6 +216,10 @@ def test_startup_and_mmr_bridge_fallback():
     assert mmr_bridge.is_legacy_emoji_rig_hidden(bpy.context, mmr_arm) is True
     assert bpy.ops.morphrig.toggle_legacy_mmr_emoji() == {"FINISHED"}
     assert mmr_bridge.is_legacy_emoji_rig_hidden(bpy.context, mmr_arm) is False
+
+    meta_fake = _create_armature("Temp_MetaRig", [("c_head.x", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))])
+    meta_fake["mmr"] = {"Generate_controllers": 1, "MMR_Arm": 1}
+    assert mmr_bridge.is_final_mmr_controller_rig(meta_fake) is False
     print("[Stage 1] PASS: startup speed, MMR bridge fallback, mock MMR panel/rig, legacy toggle")
 
 
@@ -546,10 +550,28 @@ def _verify_embedded_mmr_rig_workflow():
     from mathutils import Vector
     from morphrig import compat, rig_builder
 
-    face_mesh, _mmd_arm, rig_arm = _build_two_armature_mmr_rig()
+    face_mesh, mmd_arm, rig_arm = _build_two_armature_mmr_rig()
     for coll_name in ("Torso (Redirect)", "_parent"):
         coll = rig_arm.data.collections.new(coll_name)
         coll.assign(rig_arm.data.bones["head"])
+
+    # Simulate Pengujian 2: hidden raw MMD armature holds real MMR PointerProperty IDPropertyGroup.
+    mmd_arm["mmr"] = {"Weight_bone_parent_fix": 1, "presets": "Genshin"}
+    mmd_arm.hide_set(True)
+
+    for obj in bpy.context.scene.objects:
+        obj.select_set(False)
+    rig_arm.select_set(True)
+    bpy.context.view_layer.objects.active = rig_arm
+    settings = bpy.context.scene.morphrig
+    settings.target_mesh = None
+    settings.merge_into_mmr_rig = True
+    assert bpy.ops.morphrig.scan_shape_keys() == {"FINISHED"}
+    assert settings.target_mesh == face_mesh
+    assert bpy.ops.morphrig.generate_board() == {"FINISHED"}
+    assert rig_builder.find_board_for_mesh(bpy.context, face_mesh) == rig_arm
+    assert mmd_arm.get("morphrig_embedded") is None
+    assert bpy.ops.morphrig.remove_board() == {"FINISHED"}
 
     rig_arm.location = (0.2, -0.3, 0.1)
     rig_arm.rotation_euler = (0.15, -0.25, 0.4)
@@ -873,11 +895,13 @@ def _build_two_armature_mmr_rig():
         "刻晴_arm",
         [("頭", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))],
     )
+    mmd_arm["mmr"] = {"Weight_bone_parent_fix": 1, "presets": "Genshin"}
     rig_arm = _create_armature(
         "RIG-刻晴_arm",
         [("head", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))],
     )
     rig_arm["mmr"] = True
+    mmd_arm.hide_set(True)
 
     con = mmd_arm.pose.bones["頭"].constraints.new("COPY_TRANSFORMS")
     con.target = rig_arm
@@ -898,6 +922,7 @@ def test_two_armature_mmr_bridge():
 
     face_mesh, mmd_arm, rig_arm = _build_two_armature_mmr_rig()
 
+    assert mmr_bridge.is_final_mmr_controller_rig(mmd_arm) is False
     info = mmr_bridge.detect_mmr_rig_info(face_mesh)
     assert info.armature == rig_arm, f"Expected RIG-刻晴_arm, got {info.armature}"
     assert info.is_mmr_rig is True
@@ -1064,6 +1089,8 @@ def test_auto_merge_when_mmr_generated_after_morphrig():
         "刻晴_arm",
         [("頭", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))],
     )
+    mmd_arm["mmr"] = {"Weight_bone_parent_fix": 1, "presets": "Genshin"}
+    assert mmr_bridge.is_final_mmr_controller_rig(mmd_arm) is False
     face_mesh = _create_test_character_mesh("刻晴_mesh", REALISTIC_SHAPE_KEYS)
     face_mod = face_mesh.modifiers.new(name="Armature", type="ARMATURE")
     face_mod.object = mmd_arm
@@ -1116,13 +1143,14 @@ def test_auto_merge_when_mmr_generated_after_morphrig():
         "RIG-刻晴_arm",
         [("head", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))],
     )
-    rig_arm["mmr"] = True
     for coll_name in ("Torso (Redirect)", "_parent"):
         coll = rig_arm.data.collections.new(coll_name)
         coll.assign(rig_arm.data.bones["head"])
     con = mmd_arm.pose.bones["頭"].constraints.new("COPY_TRANSFORMS")
     con.target = rig_arm
     con.subtarget = "head"
+    mmd_arm.hide_set(True)
+    bpy.context.view_layer.objects.active = None
 
     morphrig._last_scene_sig = None
     morphrig._pending_auto_merge = False
@@ -1134,6 +1162,8 @@ def test_auto_merge_when_mmr_generated_after_morphrig():
     assert morphrig._pending_auto_merge is False
     assert not any(o.name.startswith("MorphRig_Board_") for o in bpy.data.objects)
     assert rig_builder.find_board_for_mesh(bpy.context, face_mesh) == rig_arm
+    assert mmd_arm.get("morphrig_embedded") is None
+    assert rig_builder.EMBEDDED_FACE_ROOT_NAME not in mmd_arm.data.bones
     assert bool(rig_arm.get("morphrig_embedded")) is True
     assert bool(rig_arm.get("morphrig_kuchisync_passthrough")) is True
     assert settings.kuchisync_passthrough is True

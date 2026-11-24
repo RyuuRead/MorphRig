@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Facial board layout, armature construction, drivers and board maintenance."""
 
+from contextlib import contextmanager
 import json
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
@@ -260,11 +261,70 @@ def _fader_names(board_armature) -> list:
     return [pb.name for pb in board_armature.pose.bones if pb.name.startswith(FADER_PREFIX)]
 
 
+def _view3d_override(context, obj) -> dict:
+    override = {
+        "active_object": obj,
+        "object": obj,
+        "selected_objects": [obj] if obj is not None else [],
+        "selected_editable_objects": [obj] if obj is not None else [],
+    }
+    wm = getattr(context, "window_manager", None)
+    if wm is not None:
+        win = getattr(context, "window", None)
+        windows = [win] if win is not None else list(getattr(wm, "windows", ()))
+        for candidate_win in windows:
+            screen = getattr(candidate_win, "screen", None)
+            if screen is None:
+                continue
+            for area in screen.areas:
+                if area.type == "VIEW_3D":
+                    override["window"] = candidate_win
+                    override["screen"] = screen
+                    override["area"] = area
+                    for region in area.regions:
+                        if region.type == "WINDOW":
+                            override["region"] = region
+                            break
+                    return override
+    return override
+
+
+def _set_object_mode(context, obj, mode: str) -> None:
+    if obj is None or obj.mode == mode:
+        return
+    view_layer = getattr(context, "view_layer", None)
+    if view_layer is not None:
+        view_layer.objects.active = obj
+    with context.temp_override(**_view3d_override(context, obj)):
+        bpy.ops.object.mode_set(mode=mode)
+
+
+@contextmanager
+def _edit_armature_context(context, board):
+    # Temporarily unhide if needed so VIEW_3D mode_set.poll() always has a valid active object.
+    was_hide_viewport = bool(getattr(board, "hide_viewport", False))
+    was_hide_temp = bool(board.hide_get()) if hasattr(board, "hide_get") else False
+    if was_hide_viewport:
+        board.hide_viewport = False
+    if was_hide_temp:
+        board.hide_set(False)
+    _select_board_only(context, board)
+    _set_object_mode(context, board, "EDIT")
+    try:
+        yield board.data.edit_bones
+    finally:
+        _set_object_mode(context, board, "OBJECT")
+        if was_hide_temp:
+            board.hide_set(True)
+        if was_hide_viewport:
+            board.hide_viewport = True
+
+
 def _ensure_object_mode(context) -> None:
     view_layer = getattr(context, "view_layer", None)
     active = view_layer.objects.active if view_layer is not None else None
     if active is not None and active.mode != "OBJECT":
-        bpy.ops.object.mode_set(mode="OBJECT")
+        _set_object_mode(context, active, "OBJECT")
 
 
 def find_all_boards() -> list:
@@ -686,12 +746,9 @@ def _populate_board(
     root_length = 0.05 * scale
     fader_length = 0.012 * scale
 
-    _select_board_only(context, board)
     used_names = {BOARD_ROOT_NAME}
     entries = []
-    bpy.ops.object.mode_set(mode="EDIT")
-    try:
-        edit_bones = arm_data.edit_bones
+    with _edit_armature_context(context, board) as edit_bones:
         root = edit_bones.new(BOARD_ROOT_NAME)
         root.head = (0.0, 0.0, 0.0)
         root.tail = (0.0, 0.0, root_length)
@@ -713,8 +770,6 @@ def _populate_board(
             fader.use_deform = False
 
             entries.append((placement, fader_name))
-    finally:
-        bpy.ops.object.mode_set(mode="OBJECT")
 
     root_pb = board.pose.bones[BOARD_ROOT_NAME]
     root_pb.custom_shape = frame_wgt
@@ -852,10 +907,7 @@ def _populate_mouth_joystick_board(
     has_a = "A" in primary_vowels
     has_uieo = any(key in primary_vowels for key in ("I", "U", "E", "O"))
 
-    _select_board_only(context, board)
-    bpy.ops.object.mode_set(mode="EDIT")
-    try:
-        edit_bones = arm_data.edit_bones
+    with _edit_armature_context(context, board) as edit_bones:
         root = edit_bones.new(BOARD_ROOT_NAME)
         root.head = (0.0, 0.0, 0.0)
         root.tail = (0.0, 0.0, root_length)
@@ -879,8 +931,6 @@ def _populate_mouth_joystick_board(
             bone_joy.parent = root
             bone_joy.use_connect = False
             bone_joy.use_deform = False
-    finally:
-        bpy.ops.object.mode_set(mode="OBJECT")
 
     root_pb = board.pose.bones[BOARD_ROOT_NAME]
     root_pb.custom_shape = frame_wgt
@@ -1079,79 +1129,76 @@ def _build_embedded_mmr_rig(
 
     try:
         arm_data = embed_arm.data
-        _select_board_only(context, embed_arm)
-        bpy.ops.object.mode_set(mode="EDIT")
         try:
-            edit_bones = arm_data.edit_bones
-            used_names = set(edit_bones.keys())
-            head_eb = edit_bones.get(head_bone_name) if (follow_head_bone and head_bone_name) else None
+            with _edit_armature_context(context, embed_arm) as edit_bones:
+                used_names = set(edit_bones.keys())
+                head_eb = edit_bones.get(head_bone_name) if (follow_head_bone and head_bone_name) else None
 
-            if has_face:
-                face_root_name = _unique_name(EMBEDDED_FACE_ROOT_NAME, used_names)
-                face_root = edit_bones.new(face_root_name)
-                face_root.head = face_origin_local
-                face_root.tail = face_origin_local + (0.05 * local_face_scale) * axis_z
-                face_root.align_roll(axis_front)
-                face_root.use_deform = False
-                if head_eb is not None:
-                    face_root.parent = head_eb
-                    face_root.use_connect = False
-                root_bones.append(face_root_name)
-                owned_bones.append(face_root_name)
+                if has_face:
+                    face_root_name = _unique_name(EMBEDDED_FACE_ROOT_NAME, used_names)
+                    face_root = edit_bones.new(face_root_name)
+                    face_root.head = face_origin_local
+                    face_root.tail = face_origin_local + (0.05 * local_face_scale) * axis_z
+                    face_root.align_roll(axis_front)
+                    face_root.use_deform = False
+                    if head_eb is not None:
+                        face_root.parent = head_eb
+                        face_root.use_connect = False
+                    root_bones.append(face_root_name)
+                    owned_bones.append(face_root_name)
 
-                fader_len = 0.012 * local_face_scale
-                for placement in face_layout.faders:
-                    core = f"{placement.row}_{_sanitize_token(placement.label)}"
-                    if placement.side and not core.endswith(f"_{placement.side}"):
-                        core = f"{core}_{placement.side}"
-                    fader_name = _unique_name(f"{FADER_PREFIX}{core}", used_names)
-                    fader = edit_bones.new(fader_name)
-                    fader.head = face_origin_local + placement.x * axis_x + placement.z * axis_z
-                    fader.tail = fader.head + fader_len * axis_x
-                    fader.align_roll(axis_front)
-                    fader.parent = face_root
-                    fader.use_connect = False
-                    fader.use_deform = False
-                    face_entries.append((placement, fader_name))
-                    owned_bones.append(fader_name)
+                    fader_len = 0.012 * local_face_scale
+                    for placement in face_layout.faders:
+                        core = f"{placement.row}_{_sanitize_token(placement.label)}"
+                        if placement.side and not core.endswith(f"_{placement.side}"):
+                            core = f"{core}_{placement.side}"
+                        fader_name = _unique_name(f"{FADER_PREFIX}{core}", used_names)
+                        fader = edit_bones.new(fader_name)
+                        fader.head = face_origin_local + placement.x * axis_x + placement.z * axis_z
+                        fader.tail = fader.head + fader_len * axis_x
+                        fader.align_roll(axis_front)
+                        fader.parent = face_root
+                        fader.use_connect = False
+                        fader.use_deform = False
+                        face_entries.append((placement, fader_name))
+                        owned_bones.append(fader_name)
 
-            if has_mouth:
-                mouth_root_name = _unique_name(EMBEDDED_MOUTH_ROOT_NAME, used_names)
-                mouth_root = edit_bones.new(mouth_root_name)
-                mouth_root.head = mouth_origin_local
-                mouth_root.tail = mouth_origin_local + (0.05 * local_mouth_scale) * axis_z
-                mouth_root.align_roll(axis_front)
-                mouth_root.use_deform = False
-                if head_eb is not None:
-                    mouth_root.parent = head_eb
-                    mouth_root.use_connect = False
-                root_bones.append(mouth_root_name)
-                owned_bones.append(mouth_root_name)
+                if has_mouth:
+                    mouth_root_name = _unique_name(EMBEDDED_MOUTH_ROOT_NAME, used_names)
+                    mouth_root = edit_bones.new(mouth_root_name)
+                    mouth_root.head = mouth_origin_local
+                    mouth_root.tail = mouth_origin_local + (0.05 * local_mouth_scale) * axis_z
+                    mouth_root.align_roll(axis_front)
+                    mouth_root.use_deform = False
+                    if head_eb is not None:
+                        mouth_root.parent = head_eb
+                        mouth_root.use_connect = False
+                    root_bones.append(mouth_root_name)
+                    owned_bones.append(mouth_root_name)
 
-                joy_len = 0.018 * local_mouth_scale
-                if "A" in primary_vowels:
-                    bone_a_name = _unique_name("Fader_Vowel_A", used_names)
-                    bone_a = edit_bones.new(bone_a_name)
-                    bone_a.head = mouth_origin_local + local_bar_y * axis_z
-                    bone_a.tail = bone_a.head + joy_len * axis_z
-                    bone_a.align_roll(axis_front)
-                    bone_a.parent = mouth_root
-                    bone_a.use_connect = False
-                    bone_a.use_deform = False
-                    owned_bones.append(bone_a_name)
+                    joy_len = 0.018 * local_mouth_scale
+                    if "A" in primary_vowels:
+                        bone_a_name = _unique_name("Fader_Vowel_A", used_names)
+                        bone_a = edit_bones.new(bone_a_name)
+                        bone_a.head = mouth_origin_local + local_bar_y * axis_z
+                        bone_a.tail = bone_a.head + joy_len * axis_z
+                        bone_a.align_roll(axis_front)
+                        bone_a.parent = mouth_root
+                        bone_a.use_connect = False
+                        bone_a.use_deform = False
+                        owned_bones.append(bone_a_name)
 
-                if any(key in primary_vowels for key in ("I", "U", "E", "O")):
-                    bone_joy_name = _unique_name("Fader_Vowel_UIEO", used_names)
-                    bone_joy = edit_bones.new(bone_joy_name)
-                    bone_joy.head = mouth_origin_local + local_half * axis_x + local_half * axis_z
-                    bone_joy.tail = bone_joy.head + joy_len * axis_z
-                    bone_joy.align_roll(axis_front)
-                    bone_joy.parent = mouth_root
-                    bone_joy.use_connect = False
-                    bone_joy.use_deform = False
-                    owned_bones.append(bone_joy_name)
+                    if any(key in primary_vowels for key in ("I", "U", "E", "O")):
+                        bone_joy_name = _unique_name("Fader_Vowel_UIEO", used_names)
+                        bone_joy = edit_bones.new(bone_joy_name)
+                        bone_joy.head = mouth_origin_local + local_half * axis_x + local_half * axis_z
+                        bone_joy.tail = bone_joy.head + joy_len * axis_z
+                        bone_joy.align_roll(axis_front)
+                        bone_joy.parent = mouth_root
+                        bone_joy.use_connect = False
+                        bone_joy.use_deform = False
+                        owned_bones.append(bone_joy_name)
         finally:
-            bpy.ops.object.mode_set(mode="OBJECT")
             embed_arm["morphrig_owned_bones"] = json.dumps(owned_bones, ensure_ascii=False)
             embed_arm["morphrig_root_bones"] = json.dumps(root_bones, ensure_ascii=False)
 
@@ -1406,7 +1453,7 @@ def build_facial_board(
         )
         if prev_active is embed_arm and prev_mode == "POSE":
             _select_board_only(context, embed_arm)
-            bpy.ops.object.mode_set(mode="POSE")
+            _set_object_mode(context, embed_arm, "POSE")
         context.view_layer.update()
         return result
 
@@ -1820,16 +1867,11 @@ def remove_facial_board(context, board_armature) -> bool:
             if name in board_armature.pose.bones and board_armature.pose.bones[name].custom_shape is not None
         }
         if owned_bones:
-            _select_board_only(context, board_armature)
-            bpy.ops.object.mode_set(mode="EDIT")
-            try:
-                edit_bones = board_armature.data.edit_bones
+            with _edit_armature_context(context, board_armature) as edit_bones:
                 for bone_name in owned_bones:
                     eb = edit_bones.get(bone_name)
                     if eb is not None:
                         edit_bones.remove(eb)
-            finally:
-                bpy.ops.object.mode_set(mode="OBJECT")
 
         owned_collections = _load_json(board_armature, "morphrig_owned_collections", [])
         bone_colls = getattr(board_armature.data, "collections", None)
