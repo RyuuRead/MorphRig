@@ -10,7 +10,7 @@
 
 ## Overview
 
-MorphRig (`v0.1.0`) generates a 2-lane Face Board and a 2D `a / o-u-i-e` Mouth Joystick Rig directly from a character mesh's shape keys without external `.blend` templates. When MikuMikuRig is present, it embeds facial controls into the generated `RIG-*` armature for unified Pose Mode animation, and falls back to Standalone Mode otherwise.
+MorphRig generates a 2-lane Face Board and a 2D `a / o-u-i-e` Mouth Joystick Rig directly from a character mesh's shape keys without external `.blend` templates. When MikuMikuRig is present, it embeds facial controls into the generated `RIG-*` armature for unified Pose Mode animation, and falls back to Standalone Mode otherwise.
 
 > Built to dock into the MikuMikuRig N-Panel tab (`MMR`) while keeping standalone boards and non-MMR rigs working out of the box.
 
