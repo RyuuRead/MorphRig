@@ -1370,6 +1370,7 @@ def build_facial_board(
     if target_mesh.data.shape_keys is None:
         raise ValueError(f"'{target_mesh.name}' has no shape keys.")
 
+    mmr_bridge.install_mmr_rig_poll_guard()
     view_layer = getattr(context, "view_layer", None)
     prev_active = view_layer.objects.active if view_layer is not None else None
     prev_mode = prev_active.mode if prev_active is not None else "OBJECT"

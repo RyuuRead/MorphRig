@@ -1,9 +1,9 @@
-schema_version = "0.1.0"
+schema_version = "1.0"
 id = "morphrig"
 name = "MorphRig"
-version = "0.1.0"
+version = "1.0"
 tagline = "3D Viewport Facial Board UI generator & MikuMikuRig companion for anime/MMD characters"
 maintainer = "RyuuRead"
 type = "add-on"
-blender_version_min = "4.4.0"
+blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]

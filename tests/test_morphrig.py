@@ -220,6 +220,44 @@ def test_startup_and_mmr_bridge_fallback():
     meta_fake = _create_armature("Temp_MetaRig", [("c_head.x", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))])
     meta_fake["mmr"] = {"Generate_controllers": 1, "MMR_Arm": 1}
     assert mmr_bridge.is_final_mmr_controller_rig(meta_fake) is False
+
+    class OBJECT_OT_mmr_rig(bpy.types.Operator):
+        bl_idname = "object.mmr_rig"
+        bl_label = "Build a controller"
+
+        @classmethod
+        def poll(cls, context):
+            obj = getattr(getattr(context, "view_layer", None), "objects", None)
+            active = getattr(obj, "active", None) if obj is not None else getattr(context, "active_object", None)
+            return active is not None and active.type == "ARMATURE"
+
+        def execute(self, context):
+            return {"FINISHED"}
+
+    bpy.utils.register_class(OBJECT_OT_mmr_rig)
+    try:
+        assert mmr_bridge.install_mmr_rig_poll_guard() == 1
+        board_stub = _create_armature("MorphRig_Board_GuardTest", [("Board_Root", (0.0, 0.0, 0.0), (0.0, 0.0, 0.1))])
+        bpy.context.view_layer.objects.active = board_stub
+        assert bpy.ops.object.mmr_rig.poll() is False
+
+        embedded_stub = _create_armature("RIG-GuardEmbedded", [("head", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))])
+        embedded_stub["morphrig_target_mesh"] = "PlainMesh"
+        bpy.context.view_layer.objects.active = embedded_stub
+        assert bpy.ops.object.mmr_rig.poll() is False
+
+        raw_mmd = _create_armature("Guard_MMD_Arm", [("頭", (0.0, 0.0, 1.4), (0.0, 0.0, 1.6))])
+        bpy.context.view_layer.objects.active = raw_mmd
+        assert bpy.ops.object.mmr_rig.poll() is True
+
+        assert mmr_bridge.uninstall_mmr_rig_poll_guard() == 1
+        bpy.context.view_layer.objects.active = board_stub
+        assert bpy.ops.object.mmr_rig.poll() is True
+    finally:
+        mmr_bridge.uninstall_mmr_rig_poll_guard()
+        bpy.utils.unregister_class(OBJECT_OT_mmr_rig)
+        mmr_bridge.install_mmr_rig_poll_guard()
+
     print("[Stage 1] PASS: startup speed, MMR bridge fallback, mock MMR panel/rig, legacy toggle")
 
 

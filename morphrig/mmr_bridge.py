@@ -21,6 +21,59 @@ _MMR_CLASS_PREFIXES = (
     "MMR_key_Options",
 )
 _MMR_RIG_COLLECTION_NAMES = ("Torso (Redirect)", "_parent")
+_MMR_RIG_OPERATOR_CLASSES = ("OBJECT_OT_mmr_rig", "MMR_LEGACY_OT_generate_rig")
+_ORIGINAL_MMR_RIG_POLLS: dict[type, object] = {}
+
+
+def is_morphrig_board_object(obj: Optional[bpy.types.Object]) -> bool:
+    return (
+        obj is not None
+        and getattr(obj, "type", "") == "ARMATURE"
+        and (obj.name.startswith("MorphRig_Board_") or obj.get("morphrig_target_mesh") is not None)
+    )
+
+
+def install_mmr_rig_poll_guard() -> int:
+    guarded = 0
+    for cls_name in _MMR_RIG_OPERATOR_CLASSES:
+        op_cls = getattr(bpy.types, cls_name, None)
+        if op_cls is None or op_cls in _ORIGINAL_MMR_RIG_POLLS:
+            continue
+        orig_poll = op_cls.__dict__.get("poll")
+        if orig_poll is None:
+            orig_poll = getattr(op_cls, "poll", None)
+        _ORIGINAL_MMR_RIG_POLLS[op_cls] = orig_poll
+
+        @classmethod
+        def _guarded_poll(cls, context, _orig=orig_poll):
+            view_layer = getattr(context, "view_layer", None)
+            view_objs = getattr(view_layer, "objects", None) if view_layer is not None else None
+            active_obj = getattr(view_objs, "active", None) if view_objs is not None else getattr(context, "active_object", None)
+            if is_morphrig_board_object(active_obj):
+                if hasattr(cls, "poll_message_set"):
+                    cls.poll_message_set("Select the character MMD armature instead of a MorphRig facial board.")
+                return False
+            if isinstance(_orig, classmethod):
+                return bool(_orig.__func__(cls, context))
+            if callable(_orig):
+                return bool(_orig(context))
+            return True
+
+        op_cls.poll = _guarded_poll
+        guarded += 1
+    return guarded
+
+
+def uninstall_mmr_rig_poll_guard() -> int:
+    restored = 0
+    for op_cls, orig_poll in list(_ORIGINAL_MMR_RIG_POLLS.items()):
+        if orig_poll is not None:
+            op_cls.poll = orig_poll
+        elif "poll" in op_cls.__dict__:
+            delattr(op_cls, "poll")
+        restored += 1
+    _ORIGINAL_MMR_RIG_POLLS.clear()
+    return restored
 
 
 @dataclass
@@ -263,7 +316,7 @@ def _check_is_mmr_rig(arm_obj: Optional[bpy.types.Object]) -> bool:
         return True
     return False
 
-
+#UGH I HATE MY LIFE
 def is_final_mmr_controller_rig(arm_obj: Optional[bpy.types.Object]) -> bool:
     return _check_is_mmr_rig(arm_obj)
 

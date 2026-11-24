@@ -14,8 +14,8 @@ from bpy.props import (
 bl_info = {
     "name": "MorphRig",
     "author": "RyuuRead",
-    "version": (0, 1, 0),
-    "blender": (4, 4, 0),
+    "version": (1, 0),
+    "blender": (4, 2, 0),
     "location": "View3D > Sidebar > MikuMikuRig / MorphRig",
     "description": "3D Viewport Facial Board UI generator and MikuMikuRig companion",
     "category": "Rigging",
@@ -197,8 +197,9 @@ _CLASSES = (
 
 
 def _deferred_refresh_panel_category():
-    from . import ui_panel
+    from . import mmr_bridge, ui_panel
 
+    mmr_bridge.install_mmr_rig_poll_guard()
     ui_panel.refresh_panel_category()
     return None
 
@@ -270,9 +271,10 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.morphrig = PointerProperty(type=MorphRigSettings)
 
-    from . import ui_panel
+    from . import mmr_bridge, ui_panel
 
     ui_panel.register_ui()
+    mmr_bridge.install_mmr_rig_poll_guard()
     if hasattr(bpy.app, "timers") and not bpy.app.timers.is_registered(_deferred_refresh_panel_category):
         bpy.app.timers.register(_deferred_refresh_panel_category, first_interval=0.5)
     if _on_depsgraph_update_post not in bpy.app.handlers.depsgraph_update_post:
@@ -295,8 +297,9 @@ def unregister():
     _last_scene_sig = None
     _pending_auto_merge = False
 
-    from . import ui_panel
+    from . import mmr_bridge, ui_panel
 
+    mmr_bridge.uninstall_mmr_rig_poll_guard()
     ui_panel.unregister_ui()
     if hasattr(bpy.types.Scene, "morphrig"):
         del bpy.types.Scene.morphrig
