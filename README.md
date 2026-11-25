@@ -49,7 +49,7 @@ Supported targets: **Blender 4.5 LTS**, **Blender 5.2 LTS**, and **Goo Engine 4.
 ## Changelog
 
 ### Release 1.1
-- **MMR Rig Compatibility Fix:** Resolved an issue where a generated Facial Board UI could no longer be paired or re-rigged with a MikuMikuRig (`RIG-*`) armature. Both existing boards and newly generated MMR rigs now reconnect cleanly without losing facial drivers.
+- **Guard Against Accidental MMR Rigging on Facial Boards:** Fixed a bug where having a MorphRig Facial Board UI selected as the active object allowed MikuMikuRig's **Build a controller** to execute on the board itself (`RIG-MorphRig_Board_*`). Facial boards are now protected from being rigged as MMR character armatures while still pairing cleanly with `RIG-*` rigs.
 
 ---
 
