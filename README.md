@@ -46,6 +46,13 @@ Supported targets: **Blender 4.5 LTS**, **Blender 5.2 LTS**, and **Goo Engine 4.
 
 ---
 
+## Changelog
+
+### Release 1.1
+- **MMR Rig Compatibility Fix:** Resolved an issue where a generated Facial Board UI could no longer be paired or re-rigged with a MikuMikuRig (`RIG-*`) armature. Both existing boards and newly generated MMR rigs now reconnect cleanly without losing facial drivers.
+
+---
+
 ## Credits & License
 
 - Built as a companion add-on for [MikuMikuRig](https://github.com/XiaoFFGel/MikuMikuRig) with [KuchiSync](https://github.com/RyuuRead/KuchiSync) passthrough support.

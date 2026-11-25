@@ -33,6 +33,26 @@ def is_morphrig_board_object(obj: Optional[bpy.types.Object]) -> bool:
     )
 
 
+def _make_mmr_poll_guard(orig_poll):
+    # Blender 4.4 bpy_class_call requires Operator.poll to declare strictly (cls, context).
+    @classmethod
+    def _guarded_poll(cls, context):
+        view_layer = getattr(context, "view_layer", None)
+        view_objs = getattr(view_layer, "objects", None) if view_layer is not None else None
+        active_obj = getattr(view_objs, "active", None) if view_objs is not None else getattr(context, "active_object", None)
+        if is_morphrig_board_object(active_obj):
+            if hasattr(cls, "poll_message_set"):
+                cls.poll_message_set("Select the character MMD armature instead of a MorphRig facial board.")
+            return False
+        if isinstance(orig_poll, classmethod):
+            return bool(orig_poll.__func__(cls, context))
+        if callable(orig_poll):
+            return bool(orig_poll(context))
+        return True
+
+    return _guarded_poll
+
+
 def install_mmr_rig_poll_guard() -> int:
     guarded = 0
     for cls_name in _MMR_RIG_OPERATOR_CLASSES:
@@ -43,23 +63,7 @@ def install_mmr_rig_poll_guard() -> int:
         if orig_poll is None:
             orig_poll = getattr(op_cls, "poll", None)
         _ORIGINAL_MMR_RIG_POLLS[op_cls] = orig_poll
-
-        @classmethod
-        def _guarded_poll(cls, context, _orig=orig_poll):
-            view_layer = getattr(context, "view_layer", None)
-            view_objs = getattr(view_layer, "objects", None) if view_layer is not None else None
-            active_obj = getattr(view_objs, "active", None) if view_objs is not None else getattr(context, "active_object", None)
-            if is_morphrig_board_object(active_obj):
-                if hasattr(cls, "poll_message_set"):
-                    cls.poll_message_set("Select the character MMD armature instead of a MorphRig facial board.")
-                return False
-            if isinstance(_orig, classmethod):
-                return bool(_orig.__func__(cls, context))
-            if callable(_orig):
-                return bool(_orig(context))
-            return True
-
-        op_cls.poll = _guarded_poll
+        op_cls.poll = _make_mmr_poll_guard(orig_poll)
         guarded += 1
     return guarded
 
